@@ -8,7 +8,7 @@ The [implementation draft](IMPLEMENTATION-DRAFT.md) defines scope and acceptance
 
 Use one branch per PR, under codex/. A single branch cannot represent several independent stacked PRs. Merge a completed, verified PR before starting its dependent PR; stack branches only when a dependent change must be reviewed before its base merges. Retarget dependent PRs after merging the base.
 
-The first branch is `codex/vib-001-desktop-baseline`. Adoption can be reviewed separately from remaining baseline qualification under [VIB-001 / #1](https://github.com/felixrydberg/Vibeinator/issues/1). Keep that issue open until its live-provider and recovery acceptance checks are satisfied. The [adoption report](BASELINE-ADOPTION.md) records the passing build/installer checks and remaining failures. Link every PR to its issue; use “Closes #…” only when all acceptance work is done. Never merge a PR with unexplained failed checks.
+The first branch is `codex/vib-001-desktop-baseline`, with [draft adoption PR #21](https://github.com/felixrydberg/Vibeinator/pull/21). Adoption can be reviewed separately from remaining baseline qualification under [VIB-001 / #1](https://github.com/felixrydberg/Vibeinator/issues/1). Keep that issue open until its live-provider and recovery acceptance checks are satisfied. The [adoption report](BASELINE-ADOPTION.md) records the passing build/installer checks and remaining failures. Link every PR to its issue; use “Closes #…” only when all acceptance work is done. Never merge a PR with unexplained failed checks.
 
 Recommended queue: 001 → 002/003 → 004 → 005/006 → 007/008 → 009 → 013 → 014, then 010–012 and 015–019. VIB-020 is optional. Independent steps may be reviewed separately without introducing another shipped application.
 
