@@ -5,7 +5,7 @@
 // Exports: Vitest coverage for ProfileStatsArchive.
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { MessageId, ThreadId, TurnId } from "@synara/contracts";
+import { MessageId, ProjectId, ThreadId, TurnId } from "@synara/contracts";
 import { Effect, Layer } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -21,6 +21,8 @@ import {
 import { ServerConfig } from "./config";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite";
 import { PROVIDER_COMMAND_REACTOR_CONSUMER } from "./persistence/Services/OrchestrationEventDeliveries";
+import { NativeArchiveRepositoryLive } from "./persistence/Layers/NativeArchive";
+import { NativeArchiveRepository } from "./persistence/Services/NativeArchive";
 import { ProfileStatsQuery, ProfileStatsQueryLive } from "./profileStats";
 import {
   aggregateThreadTurnSnapshotRows,
@@ -293,6 +295,41 @@ describe("ProfileStatsArchive", () => {
     deletedCheckpointRefCalls.length = 0;
     isGitRepositoryImpl = () => Effect.succeed(true);
     deleteCheckpointRefsImpl = (input) => Effect.sync(() => recordDeletedCheckpointRefs(input));
+  });
+
+  it("purges retained archive evidence atomically with its thread while preserving another thread", async () => {
+    await runArchiveTest(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const archive = yield* ProfileStatsArchive;
+        yield* seedTwoThreadsWithActivity;
+        yield* acknowledgeProviderCommandJournal(sql);
+        yield* Effect.gen(function* () {
+          const nativeArchive = yield* NativeArchiveRepository;
+          for (const threadId of ["thread-keep", "thread-purge"]) {
+            yield* nativeArchive.appendPayload({
+              projectId: ProjectId.makeUnsafe("project-archive"),
+              threadId: ThreadId.makeUnsafe(threadId),
+              payloadKey: "retained",
+              content: { encoding: "utf8-text", text: "full evidence" },
+            });
+          }
+        }).pipe(Effect.provide(NativeArchiveRepositoryLive));
+        yield* sql`INSERT INTO durable_legacy_sources(project_id, thread_id, source_kind, source_id, event_id, coverage, metadata_json)
+        VALUES ('project-archive', 'thread-purge', 'event', 'event-purge-create', 'event-purge-create', 'normalized-only', '{}')`;
+        expect(yield* archive.purgeThreadWithStatsSnapshot({ threadId: "thread-purge" })).toBe(
+          true,
+        );
+        expect(yield* sql`SELECT thread_id FROM durable_payloads`).toEqual([
+          { thread_id: "thread-keep" },
+        ]);
+        expect(yield* sql`SELECT * FROM durable_legacy_sources`).toEqual([]);
+        expect(
+          yield* sql`SELECT * FROM orchestration_events WHERE stream_id = 'thread-purge'`,
+        ).toEqual([]);
+        expect(yield* sql`PRAGMA foreign_key_check`).toEqual([]);
+      }),
+    );
   });
 
   it("takes cumulative deltas per counter provider when a thread switches providers and back", () => {

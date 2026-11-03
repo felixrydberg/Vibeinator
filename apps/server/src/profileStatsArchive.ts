@@ -28,6 +28,7 @@ import { aggregateProfileSkillUsageRows, turnModelSelectionCte } from "./profile
 import { PROVIDER_COMMAND_REACTOR_CONSUMER } from "./persistence/Services/OrchestrationEventDeliveries";
 import { isProviderIntentEventType } from "./orchestration/providerIntentClassification";
 import { THREAD_RETENTION_COMMAND_ID_PREFIX } from "./threadRetention";
+import { purgeThreadNativeArchive } from "./persistence/nativeArchivePurge.ts";
 import { claudeTokenActivityCtes } from "./claudeTokenStats";
 
 interface PurgeThreadRow {
@@ -942,6 +943,7 @@ const makeProfileStatsArchive = Effect.gen(function* () {
         },
         { concurrency: 1, discard: true },
       );
+      yield* purgeThreadNativeArchive(sql, threadId);
       yield* sql`
         DELETE FROM orchestration_events
         WHERE aggregate_kind = 'thread'

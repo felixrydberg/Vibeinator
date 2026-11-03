@@ -34,11 +34,11 @@ export const joinMessageTextChunks = (row: {
 
 // SQLite TEXT is UTF-8, and Node 24's SQLite binding truncates TEXT reads at NUL.
 // JSON preserves both embedded NULs and unmatched UTF-16 code units.
+export const hasUnpairedSurrogate = (text: string): boolean =>
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text);
+
 export const encodeMessageTextFallback = (text: string): string | null =>
-  text.includes("\u0000") ||
-  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text)
-    ? JSON.stringify(text)
-    : null;
+  text.includes("\u0000") || hasUnpairedSurrogate(text) ? JSON.stringify(text) : null;
 
 /** All mutations participate in the caller's projection/event transaction. */
 export function makeMessageTextChunks(sql: SqlClient.SqlClient) {
