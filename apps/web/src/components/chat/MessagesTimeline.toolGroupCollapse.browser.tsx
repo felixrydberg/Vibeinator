@@ -1,0 +1,678 @@
+// FILE: MessagesTimeline.toolGroupCollapse.browser.tsx
+// Purpose: Browser regressions for collapsing settled tool-call runs into
+//          summary rows ("Ran 4 commands") once a newer narration block starts,
+//          and for folding the live run to one line wearing its newest call.
+// Layer: Vitest browser tests
+
+import "../../index.css";
+
+import { MessageId, TurnId } from "@synara/contracts";
+import { useState } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { render } from "vitest-browser-react";
+
+import { MessagesTimeline } from "./MessagesTimeline";
+import type { TimelineEntry } from "../../session-logic";
+import { deriveTimelineEntries } from "../../workLog";
+import { AgentActivityDetailView } from "./AgentActivityDetailView";
+import { deriveAgentActivityTimelineState } from "./agentActivity.logic";
+
+function assistantEntry(id: string, text: string, streaming: boolean): TimelineEntry {
+  return {
+    id: `entry-${id}`,
+    kind: "message",
+    createdAt: "2026-03-17T19:12:28.000Z",
+    message: {
+      id: MessageId.makeUnsafe(id),
+      role: "assistant",
+      text,
+      createdAt: "2026-03-17T19:12:28.000Z",
+      streaming,
+    },
+  };
+}
+
+function commandEntry(id: string, command: string): TimelineEntry {
+  return {
+    id: `entry-${id}`,
+    kind: "work",
+    createdAt: "2026-03-17T19:12:28.000Z",
+    entry: {
+      id,
+      createdAt: "2026-03-17T19:12:28.000Z",
+      label: "Ran command",
+      tone: "tool",
+      itemType: "command_execution",
+      toolStatus: "completed",
+      command,
+    },
+  };
+}
+
+function thinkingEntry(id: string, label: string): TimelineEntry {
+  return {
+    id: `entry-${id}`,
+    kind: "work",
+    createdAt: "2026-03-17T19:12:28.000Z",
+    entry: {
+      id,
+      createdAt: "2026-03-17T19:12:28.000Z",
+      label,
+      tone: "thinking",
+    },
+  };
+}
+
+const SETTLED_COMMANDS = [
+  "bun run lint",
+  "bun run typecheck",
+  "bun run build",
+  "node scripts/check.mjs",
+];
+// Commands whose display text passes through verbatim (no humanized rewrite).
+const LIVE_COMMANDS = ["git status", "node scripts/tail.mjs"];
+
+function ToolGroupCollapseTimeline(props: {
+  timelineEntries: TimelineEntry[];
+  onOpenAgentActivity?: (id: string) => void;
+  settled?: boolean;
+}) {
+  return (
+    <MessagesTimeline
+      hasMessages
+      isWorking={false}
+      activeTurnInProgress={!props.settled}
+      activeTurnStartedAt="2026-03-17T19:12:20.000Z"
+      timelineEntries={props.timelineEntries}
+      turnDiffSummaryByAssistantMessageId={new Map()}
+      nowIso="2026-03-17T19:12:30.000Z"
+      expandedWorkGroups={{}}
+      onToggleWorkGroup={() => {}}
+      onOpenTurnDiff={() => {}}
+      revertTurnCountByUserMessageId={new Map()}
+      onRevertUserMessage={() => {}}
+      isRevertingCheckpoint={false}
+      onImageExpand={() => {}}
+      markdownCwd={undefined}
+      resolvedTheme="dark"
+      timestampFormat="locale"
+      workspaceRoot={undefined}
+      {...(props.onOpenAgentActivity ? { onOpenAgentActivity: props.onOpenAgentActivity } : {})}
+    />
+  );
+}
+
+function createTimelineHost(): HTMLDivElement {
+  const host = document.createElement("div");
+  host.style.cssText =
+    "display:flex;flex-direction:column;width:600px;height:520px;overflow:hidden;";
+  document.body.append(host);
+  return host;
+}
+
+function findSummaryTrigger(label: string): HTMLButtonElement | null {
+  return (
+    [...document.querySelectorAll<HTMLButtonElement>("button[aria-expanded]")].find((button) =>
+      (button.textContent ?? "").includes(label),
+    ) ?? null
+  );
+}
+
+function isVisibleOutsideClosedDisclosure(text: string): boolean {
+  // The innermost element containing the text (command labels may span nested
+  // spans, so a leaf-only check would miss them).
+  const match = [...document.querySelectorAll<HTMLElement>("*")].findLast((element) =>
+    (element.textContent ?? "").includes(text),
+  );
+  return match !== undefined && match.closest("[aria-hidden='true']") === null;
+}
+
+// The live run is one disclosure line wearing its newest call; the earlier
+// calls stay unmounted until that line is opened.
+async function expectLiveRunFoldedToNewestCall(): Promise<HTMLButtonElement> {
+  const [earlierCommand, newestCommand] = LIVE_COMMANDS as [string, string];
+  await expect.poll(() => findSummaryTrigger(newestCommand) !== null).toBe(true);
+  const liveTrigger = findSummaryTrigger(newestCommand)!;
+  expect(liveTrigger.getAttribute("aria-expanded")).toBe("false");
+  expect(findSummaryTrigger("Ran 2 commands")).toBeNull();
+  expect(document.body.textContent ?? "").not.toContain(earlierCommand);
+  return liveTrigger;
+}
+
+describe("MessagesTimeline tool group collapse", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("folds consumed background work, preserves both answers and reveals the command on demand", async () => {
+    const startedAt = "2026-03-17T19:12:00.000Z";
+    const completedAt = "2026-03-17T19:12:21.000Z";
+    const entries = (settled: boolean): TimelineEntry[] => [
+      {
+        id: "request",
+        kind: "message",
+        createdAt: startedAt,
+        message: {
+          id: MessageId.makeUnsafe("request"),
+          role: "user",
+          text: "Build the app",
+          createdAt: startedAt,
+          streaming: false,
+        },
+      },
+      {
+        id: "launch",
+        kind: "work",
+        createdAt: startedAt,
+        entry: {
+          id: "launch",
+          createdAt: startedAt,
+          label: "Background build",
+          tone: "tool",
+          backgroundTask: {
+            taskId: "build-task",
+            taskType: "local_bash",
+            description: "Build app",
+            command: "node scripts/rebuild.mjs",
+            status: "finished",
+            startedAt,
+            completedAt,
+            completionActivityId: "wake",
+            exitCode: 0,
+          },
+        },
+      },
+      {
+        id: "launched",
+        kind: "message",
+        createdAt: "2026-03-17T19:12:04.000Z",
+        message: {
+          id: MessageId.makeUnsafe("launched"),
+          role: "assistant",
+          text: "The build is running.",
+          createdAt: "2026-03-17T19:12:04.000Z",
+          completedAt: "2026-03-17T19:12:04.000Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "wake",
+        kind: "work",
+        createdAt: completedAt,
+        entry: {
+          id: "wake",
+          createdAt: completedAt,
+          label: "Background task finished: Build app",
+          tone: "info",
+          backgroundTaskCompletion: {
+            taskId: "build-task",
+            taskType: "local_bash",
+            description: "Build app",
+            outcome: "finished",
+          },
+        },
+      },
+      {
+        id: "report",
+        kind: "message",
+        createdAt: "2026-03-17T19:12:22.000Z",
+        message: {
+          id: MessageId.makeUnsafe("report"),
+          role: "assistant",
+          text: "The new app is ready.",
+          createdAt: "2026-03-17T19:12:22.000Z",
+          streaming: !settled,
+          ...(settled ? { completedAt: "2026-03-17T19:12:24.000Z" } : {}),
+        },
+      },
+    ];
+    const screen = await render(<ToolGroupCollapseTimeline timelineEntries={entries(false)} />, {
+      container: createTimelineHost(),
+    });
+    try {
+      await expect
+        .element(screen.getByText("node scripts/rebuild.mjs", { exact: true }))
+        .toBeVisible();
+      await screen.rerender(<ToolGroupCollapseTimeline timelineEntries={entries(true)} settled />);
+      await expect
+        .element(screen.getByText("The build is running.", { exact: true }))
+        .toBeVisible();
+      await expect
+        .element(screen.getByText("The new app is ready.", { exact: true }))
+        .toBeVisible();
+      await expect
+        .poll(() => isVisibleOutsideClosedDisclosure("node scripts/rebuild.mjs"))
+        .toBe(false);
+      await expect.poll(() => findSummaryTrigger("Worked for") !== null).toBe(true);
+      findSummaryTrigger("Worked for")!.click();
+      await expect
+        .element(screen.getByText("node scripts/rebuild.mjs", { exact: true }))
+        .toBeVisible();
+      findSummaryTrigger("Worked for")!.click();
+      await expect
+        .poll(() => isVisibleOutsideClosedDisclosure("node scripts/rebuild.mjs"))
+        .toBe(false);
+      await expect
+        .element(screen.getByText("The new app is ready.", { exact: true }))
+        .toBeVisible();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("renders submitted questions and answers as separate transcript bubbles", async () => {
+    const entries = [
+      assistantEntry("before-question", "I need your preference.", false),
+      commandEntry("earlier-command", "git status"),
+      {
+        id: "entry-answer",
+        kind: "work" as const,
+        createdAt: "2026-03-17T19:12:28.000Z",
+        entry: {
+          id: "answered",
+          createdAt: "2026-03-17T19:12:28.000Z",
+          label: "User input submitted",
+          tone: "info" as const,
+          activityKind: "user-input.resolved",
+          userInputExchange: [
+            {
+              id: "q",
+              header: "Color",
+              question: "Which accent color?",
+              options: ["Amber", "Blue"],
+              answer: "Amber",
+            },
+          ],
+        },
+      },
+      assistantEntry("after-question", "I applied your preference.", false),
+    ];
+    const screen = await render(<ToolGroupCollapseTimeline timelineEntries={entries} />, {
+      container: createTimelineHost(),
+    });
+    await expect.element(screen.getByText("Which accent color?", { exact: true })).toBeVisible();
+    await expect.element(screen.getByText("Amber", { exact: true })).toBeVisible();
+    await expect.element(screen.getByText("Amber · Blue", { exact: true })).toBeVisible();
+    expect(isVisibleOutsideClosedDisclosure("Which accent color?")).toBe(true);
+    expect(isVisibleOutsideClosedDisclosure("Amber")).toBe(true);
+  });
+
+  it("keeps the original updates reachable from a compacted legacy reasoning row", async () => {
+    const state = deriveAgentActivityTimelineState([
+      {
+        id: "legacy-first",
+        createdAt: "2026-03-17T19:12:21.000Z",
+        label: "Reasoning update",
+        tone: "thinking",
+        detail: "First preview.\n\nOriginal detail from the first update.",
+      },
+      {
+        id: "legacy-last",
+        createdAt: "2026-03-17T19:12:22.000Z",
+        label: "Reasoning update",
+        tone: "thinking",
+        detail: "Latest preview.\n\nOriginal detail from the last update.",
+      },
+    ]);
+    function LegacyReasoningTimeline() {
+      const [detailId, setDetailId] = useState<string | null>(null);
+      const detail = detailId ? state.detailById.get(detailId) : undefined;
+      return detail ? (
+        <AgentActivityDetailView
+          detail={detail}
+          chatFontSizePx={14}
+          markdownCwd={undefined}
+          onBack={() => setDetailId(null)}
+          onImageExpand={() => {}}
+          timestampFormat="locale"
+        />
+      ) : (
+        <ToolGroupCollapseTimeline
+          timelineEntries={deriveTimelineEntries([], [], state.timelineWorkEntries)}
+          onOpenAgentActivity={setDetailId}
+        />
+      );
+    }
+    const screen = await render(<LegacyReasoningTimeline />, { container: createTimelineHost() });
+    try {
+      await screen.getByRole("button", { name: /2 updates/ }).click();
+      await expect
+        .element(screen.getByText("Original detail from the first update.", { exact: true }))
+        .toBeVisible();
+      await expect
+        .element(screen.getByText("Original detail from the last update.", { exact: true }).last())
+        .toBeVisible();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("mutes settled reasoning, summaries and narration without muting the final answer", async () => {
+    const turnId = TurnId.makeUnsafe("prose-tone-turn");
+    const entries = deriveTimelineEntries(
+      [
+        {
+          id: MessageId.makeUnsafe("tone-request"),
+          role: "user",
+          text: "Check the boundary",
+          createdAt: "2026-03-17T19:12:20.000Z",
+          streaming: false,
+        },
+        {
+          id: MessageId.makeUnsafe("tone-narration"),
+          role: "assistant",
+          turnId,
+          text: "I am checking the boundary.",
+          createdAt: "2026-03-17T19:12:23.000Z",
+          streaming: false,
+        },
+        {
+          id: MessageId.makeUnsafe("tone-final"),
+          role: "assistant",
+          turnId,
+          text: "The boundary is verified.",
+          createdAt: "2026-03-17T19:12:26.000Z",
+          completedAt: "2026-03-17T19:12:28.000Z",
+          streaming: false,
+        },
+      ],
+      [],
+      [
+        {
+          id: "tone-reasoning",
+          turnId,
+          createdAt: "2026-03-17T19:12:21.000Z",
+          label: "Reasoning trace",
+          toolCallId: "reasoning-item",
+          tone: "tool",
+          detail: "Inspect the provider boundary.",
+        },
+        {
+          id: "tone-summary",
+          turnId,
+          createdAt: "2026-03-17T19:12:22.000Z",
+          label: "Tool summary",
+          activityKind: "tool.summary",
+          tone: "info",
+          detail: "The tools checked cancellation.",
+        },
+      ],
+    );
+    const host = createTimelineHost();
+    const screen = await render(<ToolGroupCollapseTimeline timelineEntries={entries} settled />, {
+      container: host,
+    });
+    try {
+      await expect.poll(() => findSummaryTrigger("Worked for") !== null).toBe(true);
+      findSummaryTrigger("Worked for")!.click();
+      await expect
+        .element(screen.getByText("I am checking the boundary.", { exact: true }))
+        .toBeVisible();
+      const narration = host.querySelector<HTMLElement>(
+        '[data-chat-find-narration-id="tone-narration"]',
+      )!;
+      const mutedColor = getComputedStyle(narration).color;
+      const prose = host.querySelectorAll<HTMLElement>("[data-work-entry-prose='true'] p");
+      expect(prose).toHaveLength(2);
+      for (const paragraph of [...prose, narration.querySelector("p")!]) {
+        expect(getComputedStyle(paragraph).color).toBe(mutedColor);
+      }
+      const final = [...host.querySelectorAll("p")].find(
+        (paragraph) => paragraph.textContent === "The boundary is verified.",
+      )!;
+      expect(getComputedStyle(final).color).not.toBe(mutedColor);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each(["reasoning", "tool summary"] as const)(
+    "keeps %s between tool runs as full Markdown transcript text",
+    async (kind) => {
+      const host = createTimelineHost();
+      const onOpenAgentActivity = vi.fn();
+      const reasoning: TimelineEntry = {
+        id: "reasoning-row",
+        kind: "work",
+        createdAt: "2026-03-17T19:12:28.000Z",
+        entry: {
+          id: "reasoning-row",
+          createdAt: "2026-03-17T19:12:28.000Z",
+          label: kind === "reasoning" ? "Reasoning trace" : "Tool summary",
+          tone: kind === "reasoning" ? "tool" : "info",
+          ...(kind === "reasoning"
+            ? { toolCallId: "reasoning-item", toolStatus: "running" as const }
+            : { activityKind: "tool.summary" }),
+          detail: "First inspect the `provider` boundary.\n\nThen verify cancellation.",
+        },
+      };
+      const screen = await render(
+        <ToolGroupCollapseTimeline
+          timelineEntries={[
+            ...SETTLED_COMMANDS.map((command, index) => commandEntry(`before-${index}`, command)),
+            reasoning,
+            ...LIVE_COMMANDS.map((command, index) => commandEntry(`after-${index}`, command)),
+          ]}
+          onOpenAgentActivity={onOpenAgentActivity}
+        />,
+        { container: host },
+      );
+
+      try {
+        await expect.poll(() => findSummaryTrigger("Ran 4 commands") !== null).toBe(true);
+        await expectLiveRunFoldedToNewestCall();
+        expect(isVisibleOutsideClosedDisclosure("First inspect the")).toBe(true);
+        expect(isVisibleOutsideClosedDisclosure("Then verify cancellation.")).toBe(true);
+        const prose = host.querySelector<HTMLElement>("[data-work-entry-prose='true']");
+        expect(prose).not.toBeNull();
+        expect(prose!.querySelectorAll("p")).toHaveLength(2);
+        expect(prose!.querySelector("code")?.textContent).toBe("provider");
+        expect(prose!.textContent).not.toContain("`");
+        expect(prose!.closest("button")).toBeNull();
+        expect(prose!.closest("[data-tool-group-live='true']")).toBeNull();
+        expect(prose!.querySelector("[data-work-entry-icon='true']")).toBeNull();
+        expect(onOpenAgentActivity).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+        host.remove();
+      }
+    },
+  );
+
+  it("keeps the latest status above tool calls and reveals the other entries on expansion", async () => {
+    const host = createTimelineHost();
+    const statusEntry = (id: string, preview: string): TimelineEntry => ({
+      id,
+      kind: "work",
+      createdAt: "2026-03-17T19:12:28.000Z",
+      entry: {
+        id,
+        createdAt: "2026-03-17T19:12:28.000Z",
+        label: "Reasoning summary",
+        tone: "tool",
+        preview,
+      },
+    });
+    const entries = [
+      assistantEntry("narration", "Checking the integrations.", true),
+      commandEntry("first-command", LIVE_COMMANDS[0]!),
+      statusEntry("first-status", "Inspecting integrations"),
+    ];
+    const screen = await render(<ToolGroupCollapseTimeline timelineEntries={entries} />, {
+      container: host,
+    });
+
+    try {
+      await expect.poll(() => findSummaryTrigger("Inspecting integrations") !== null).toBe(true);
+      entries.push(commandEntry("last-command", LIVE_COMMANDS[1]!));
+      await screen.rerender(<ToolGroupCollapseTimeline timelineEntries={[...entries]} />);
+      expect(findSummaryTrigger("Inspecting integrations")?.getAttribute("aria-expanded")).toBe(
+        "false",
+      );
+      for (const command of LIVE_COMMANDS) {
+        expect(document.body.textContent).not.toContain(command);
+      }
+
+      entries.push(statusEntry("last-status", "Verifying the adapter"));
+      await screen.rerender(<ToolGroupCollapseTimeline timelineEntries={[...entries]} />);
+      await expect.poll(() => findSummaryTrigger("Verifying the adapter") !== null).toBe(true);
+      expect(document.body.textContent).not.toContain("Inspecting integrations");
+      expect(document.querySelectorAll('[data-tool-group-live="true"]')).toHaveLength(1);
+
+      findSummaryTrigger("Verifying the adapter")!.click();
+      for (const text of [...LIVE_COMMANDS, "Inspecting integrations"]) {
+        await expect.poll(() => isVisibleOutsideClosedDisclosure(text)).toBe(true);
+      }
+      expect(document.body.textContent?.match(/Verifying the adapter/g)).toHaveLength(1);
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("keeps calls made after steering reachable from the live tool line", async () => {
+    const host = createTimelineHost();
+    const turnId = TurnId.makeUnsafe("steered-turn");
+    const timelineEntries = deriveTimelineEntries(
+      [
+        {
+          id: MessageId.makeUnsafe("request"),
+          role: "user",
+          text: "Investigate usage",
+          createdAt: "2026-03-17T19:12:20.000Z",
+          streaming: false,
+        },
+        {
+          id: MessageId.makeUnsafe("preamble"),
+          role: "assistant",
+          turnId,
+          text: "Checking usage records.",
+          createdAt: "2026-03-17T19:12:21.000Z",
+          streaming: false,
+        },
+        {
+          id: MessageId.makeUnsafe("steering"),
+          role: "user",
+          dispatchMode: "steer",
+          text: "Only Codex",
+          createdAt: "2026-03-17T19:12:22.000Z",
+          streaming: false,
+        },
+        {
+          id: MessageId.makeUnsafe("continued"),
+          role: "assistant",
+          turnId,
+          text: "Continuing with Codex.",
+          createdAt: "2026-03-17T19:12:23.000Z",
+          streaming: true,
+        },
+      ],
+      [],
+      LIVE_COMMANDS.map((command, index) => ({
+        id: `steered-tool-${index}`,
+        turnId,
+        createdAt: `2026-03-17T19:12:2${4 + index}.000Z`,
+        label: "Running command",
+        tone: "tool",
+        itemType: "command_execution",
+        toolStatus: "running",
+        activityKind: "tool.started",
+        command,
+      })),
+    );
+    const screen = await render(<ToolGroupCollapseTimeline timelineEntries={timelineEntries} />, {
+      container: host,
+    });
+
+    try {
+      const liveTrigger = await expectLiveRunFoldedToNewestCall();
+
+      liveTrigger.click();
+
+      await expect.poll(() => liveTrigger.getAttribute("aria-expanded")).toBe("true");
+      await expect.poll(() => isVisibleOutsideClosedDisclosure(LIVE_COMMANDS[0]!)).toBe(true);
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("collapses the settled run behind a summary and folds the live run to one line", async () => {
+    const host = createTimelineHost();
+    const screen = await render(
+      <ToolGroupCollapseTimeline
+        timelineEntries={[
+          assistantEntry("narration-1", "Looking at the failing checks first.", false),
+          ...SETTLED_COMMANDS.map((command, index) => commandEntry(`settled-${index}`, command)),
+          assistantEntry("narration-2", "Now inspecting the working tree.", true),
+          ...LIVE_COMMANDS.map((command, index) => commandEntry(`live-${index}`, command)),
+        ]}
+      />,
+      { container: host },
+    );
+
+    try {
+      await expect.poll(() => findSummaryTrigger("Ran 4 commands") !== null).toBe(true);
+      const trigger = findSummaryTrigger("Ran 4 commands")!;
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+
+      // Closed groups do not mount every tool row; this keeps large settled
+      // transcripts cheap until the user asks to inspect the details.
+      for (const command of SETTLED_COMMANDS) {
+        expect(document.body.textContent ?? "").not.toContain(command);
+      }
+
+      await expectLiveRunFoldedToNewestCall();
+
+      trigger.click();
+
+      await expect.poll(() => trigger.getAttribute("aria-expanded")).toBe("true");
+      for (const command of SETTLED_COMMANDS) {
+        await expect.poll(() => isVisibleOutsideClosedDisclosure(command)).toBe(true);
+      }
+
+      trigger.click();
+
+      await expect.poll(() => trigger.getAttribute("aria-expanded")).toBe("false");
+      // Rows remain mounted only long enough for the shared 220ms close motion.
+      await expect
+        .poll(() => (document.body.textContent ?? "").includes(SETTLED_COMMANDS[0]!))
+        .toBe(false);
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+
+  it("collapses mid-turn as soon as a thinking block splits the live group", async () => {
+    const host = createTimelineHost();
+    // One live inline group: settled commands, then a thinking boundary, then
+    // the live tail. The run before the boundary must collapse while the turn
+    // is still in progress — not only once it finishes.
+    const screen = await render(
+      <ToolGroupCollapseTimeline
+        timelineEntries={[
+          assistantEntry("narration-1", "Looking at the failing checks first.", true),
+          ...SETTLED_COMMANDS.map((command, index) => commandEntry(`settled-${index}`, command)),
+          thinkingEntry("think-1", "Weighing the next verification step"),
+          ...LIVE_COMMANDS.map((command, index) => commandEntry(`live-${index}`, command)),
+        ]}
+      />,
+      { container: host },
+    );
+
+    try {
+      await expect.poll(() => findSummaryTrigger("Ran 4 commands") !== null).toBe(true);
+      expect(findSummaryTrigger("Ran 4 commands")!.getAttribute("aria-expanded")).toBe("false");
+      for (const command of SETTLED_COMMANDS) {
+        expect(document.body.textContent ?? "").not.toContain(command);
+      }
+
+      // The run after the thinking boundary is the live tail.
+      await expectLiveRunFoldedToNewestCall();
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
+});

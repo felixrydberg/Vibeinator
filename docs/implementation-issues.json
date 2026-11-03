@@ -1,0 +1,122 @@
+[
+  {
+    "id": "VIB-001",
+    "number": 1,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/1",
+    "title": "[Feature]: VIB-001 — Adopt and qualify an isolated Synara baseline"
+  },
+  {
+    "id": "VIB-002",
+    "number": 2,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/2",
+    "title": "[Feature]: VIB-002 — Restore state without automatically restarting coding goals"
+  },
+  {
+    "id": "VIB-003",
+    "number": 3,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/3",
+    "title": "[Feature]: VIB-003 — Define durable information contracts and migration fixtures"
+  },
+  {
+    "id": "VIB-004",
+    "number": 4,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/4",
+    "title": "[Feature]: VIB-004 — Add complete native-payload retention in SQLite"
+  },
+  {
+    "id": "VIB-005",
+    "number": 5,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/5",
+    "title": "[Feature]: VIB-005 — Capture Codex payloads before destructive shaping"
+  },
+  {
+    "id": "VIB-006",
+    "number": 6,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/6",
+    "title": "[Feature]: VIB-006 — Capture Claude payloads before destructive shaping"
+  },
+  {
+    "id": "VIB-007",
+    "number": 7,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/7",
+    "title": "[Feature]: VIB-007 — Enforce capture failure and projection/replay guarantees"
+  },
+  {
+    "id": "VIB-008",
+    "number": 8,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/8",
+    "title": "[Feature]: VIB-008 — Add project-scoped history search and exact payload reads"
+  },
+  {
+    "id": "VIB-009",
+    "number": 9,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/9",
+    "title": "[Feature]: VIB-009 — Persist separate project and chat/goal summary revisions"
+  },
+  {
+    "id": "VIB-010",
+    "number": 10,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/10",
+    "title": "[Feature]: VIB-010 — Add the configurable Clef decision-engine client"
+  },
+  {
+    "id": "VIB-011",
+    "number": 11,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/11",
+    "title": "[Feature]: VIB-011 — Classify completed-turn information into durable candidates"
+  },
+  {
+    "id": "VIB-012",
+    "number": 12,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/12",
+    "title": "[Feature]: VIB-012 — Rewrite summaries through isolated tools-off provider sessions"
+  },
+  {
+    "id": "VIB-013",
+    "number": 13,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/13",
+    "title": "[Feature]: VIB-013 — Build bounded handoff packets from durable information"
+  },
+  {
+    "id": "VIB-014",
+    "number": 14,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/14",
+    "title": "[Feature]: VIB-014 — Integrate immutable packets into existing handoff/recovery"
+  },
+  {
+    "id": "VIB-015",
+    "number": 15,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/15",
+    "title": "[Feature]: VIB-015 — Refresh summaries before handoff and completion, with fallback"
+  },
+  {
+    "id": "VIB-016",
+    "number": 16,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/16",
+    "title": "[Feature]: VIB-016 — Expose project/chat summaries and exact handoff context"
+  },
+  {
+    "id": "VIB-017",
+    "number": 17,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/17",
+    "title": "[Feature]: VIB-017 — Extend existing goals with evidence and project admission"
+  },
+  {
+    "id": "VIB-018",
+    "number": 18,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/18",
+    "title": "[Feature]: VIB-018 — Expose coarse tools over the retained gateway"
+  },
+  {
+    "id": "VIB-019",
+    "number": 19,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/19",
+    "title": "[Feature]: VIB-019 — Qualify migrations, provider handoffs and Windows delivery"
+  },
+  {
+    "id": "VIB-020",
+    "number": 20,
+    "url": "https://github.com/felixrydberg/Vibeinator/issues/20",
+    "title": "[Feature]: VIB-020 — Remove only measured, unwanted background costs"
+  }
+]

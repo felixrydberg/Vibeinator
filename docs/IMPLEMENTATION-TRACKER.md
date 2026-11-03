@@ -1,0 +1,36 @@
+# Implementation tracker
+
+Desktop is the only product. Keep the Electron host, embedded renderer, private backend, contracts, shared utilities and scripts as workspace packages.
+
+The [implementation draft](IMPLEMENTATION-DRAFT.md) defines scope and acceptance. All twenty implementation issues have been created in [felixrydberg/Vibeinator](https://github.com/felixrydberg/Vibeinator/issues?q=is%3Aissue+is%3Aopen). Their local body snapshots are under [issues](issues/); [implementation-issues.json](implementation-issues.json) maps each step to its GitHub number and URL. Each issue carries dependencies, scope and acceptance criteria.
+
+## Delivery workflow
+
+Use one branch per PR, under codex/. A single branch cannot represent several independent stacked PRs. Merge a completed, verified PR before starting its dependent PR; stack branches only when a dependent change must be reviewed before its base merges. Retarget dependent PRs after merging the base.
+
+The first branch is `codex/vib-001-desktop-baseline`, with [draft adoption PR #21](https://github.com/felixrydberg/Vibeinator/pull/21). Adoption can be reviewed separately from remaining baseline qualification under [VIB-001 / #1](https://github.com/felixrydberg/Vibeinator/issues/1). Keep that issue open until its live-provider and recovery acceptance checks are satisfied. The [adoption report](BASELINE-ADOPTION.md) records the passing build/installer checks and remaining failures. Link every PR to its issue; use “Closes #…” only when all acceptance work is done. Never merge a PR with unexplained failed checks.
+
+Recommended queue: 001 → 002/003 → 004 → 005/006 → 007/008 → 009 → 013 → 014, then 010–012 and 015–019. VIB-020 is optional. Independent steps may be reviewed separately without introducing another shipped application.
+
+| Step                                                                  | Outcome                                                        | Depends on                                   | State                                             |
+| --------------------------------------------------------------------- | -------------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------- |
+| [VIB-001 / #1](https://github.com/felixrydberg/Vibeinator/issues/1)   | Adopt and qualify an isolated Synara baseline                  | —                                            | In progress: desktop adoption; qualification open |
+| [VIB-002 / #2](https://github.com/felixrydberg/Vibeinator/issues/2)   | Restore state without automatically restarting coding goals    | 001                                          | Queued                                            |
+| [VIB-003 / #3](https://github.com/felixrydberg/Vibeinator/issues/3)   | Define durable information contracts and migration fixtures    | 001                                          | Queued                                            |
+| [VIB-004 / #4](https://github.com/felixrydberg/Vibeinator/issues/4)   | Add complete native-payload retention in SQLite                | 003                                          | Queued                                            |
+| [VIB-005 / #5](https://github.com/felixrydberg/Vibeinator/issues/5)   | Capture Codex payloads before destructive shaping              | 004                                          | Queued                                            |
+| [VIB-006 / #6](https://github.com/felixrydberg/Vibeinator/issues/6)   | Capture Claude payloads before destructive shaping             | 004                                          | Queued                                            |
+| [VIB-007 / #7](https://github.com/felixrydberg/Vibeinator/issues/7)   | Enforce capture failure and projection/replay guarantees       | 005, 006                                     | Queued                                            |
+| [VIB-008 / #8](https://github.com/felixrydberg/Vibeinator/issues/8)   | Add project-scoped history search and exact payload reads      | 004; both adapters for qualification         | Queued                                            |
+| [VIB-009 / #9](https://github.com/felixrydberg/Vibeinator/issues/9)   | Persist separate project and chat/goal summary revisions       | 003                                          | Queued                                            |
+| [VIB-010 / #10](https://github.com/felixrydberg/Vibeinator/issues/10) | Add the configurable Clef decision-engine client               | 003                                          | Queued                                            |
+| [VIB-011 / #11](https://github.com/felixrydberg/Vibeinator/issues/11) | Classify completed-turn information into durable candidates    | 005, 006, 009, 010                           | Queued                                            |
+| [VIB-012 / #12](https://github.com/felixrydberg/Vibeinator/issues/12) | Rewrite summaries through isolated tools-off provider sessions | 009, 011                                     | Queued                                            |
+| [VIB-013 / #13](https://github.com/felixrydberg/Vibeinator/issues/13) | Build bounded handoff packets from durable information         | 008, 009                                     | Queued                                            |
+| [VIB-014 / #14](https://github.com/felixrydberg/Vibeinator/issues/14) | Integrate immutable packets into existing handoff/recovery     | 007, 013                                     | Queued                                            |
+| [VIB-015 / #15](https://github.com/felixrydberg/Vibeinator/issues/15) | Refresh summaries before handoff and completion, with fallback | 012, 014                                     | Queued                                            |
+| [VIB-016 / #16](https://github.com/felixrydberg/Vibeinator/issues/16) | Expose project/chat summaries and exact handoff context        | 009, 014                                     | Queued                                            |
+| [VIB-017 / #17](https://github.com/felixrydberg/Vibeinator/issues/17) | Extend existing goals with evidence and project admission      | 002, 003, 007; 015 for final completion path | Queued                                            |
+| [VIB-018 / #18](https://github.com/felixrydberg/Vibeinator/issues/18) | Expose coarse tools over the retained gateway                  | 008, 010, 017                                | Queued                                            |
+| [VIB-019 / #19](https://github.com/felixrydberg/Vibeinator/issues/19) | Qualify migrations, provider handoffs and Windows delivery     | All shipped behavior above                   | Queued                                            |
+| [VIB-020 / #20](https://github.com/felixrydberg/Vibeinator/issues/20) | Remove only measured, unwanted background costs                | 019 and measurements                         | Optional, after measurement                       |

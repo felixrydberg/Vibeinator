@@ -1,0 +1,244 @@
+import type { DesktopSafariAccessInfo } from "@synara/contracts";
+import { Schema } from "effect";
+import { SettingsIcon } from "~/lib/icons";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useLocalStorage } from "../hooks/useLocalStorage";
+import { Button } from "./ui/button";
+import { useAnnouncementSheetSlot, useAnnouncementSheetSlotStore } from "./announcementSheetSlot";
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPopup,
+  DialogTitle,
+} from "./ui/dialog";
+import { useTranslation } from "~/i18n";
+
+export const SAFARI_ACCESS_STORAGE_KEY = "synara:safari-access-onboarding:v1";
+const OPEN_EVENT = "synara:safari-access-setup";
+/** "continued" is a legacy value from the earlier two-button intro; treat it like "later". */
+const Decision = Schema.Literals(["unseen", "later", "continued"]);
+const SAFARI_ICON_SRC = "/app-icons/safari.png";
+
+const STATUS = {
+  settingsOpened: "System Settings is open. Once Synara is switched on, quit and reopen it.",
+  appRevealed: "Synara is selected in Finder. Drag it into the Full Disk Access list.",
+  openFailed: "Couldn't open it automatically. It lives in System Settings › Privacy & Security.",
+} as const;
+
+function useSafariAccessInfo() {
+  const [info, setInfo] = useState<DesktopSafariAccessInfo | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    const bridge = window.desktopBridge?.safariAccess;
+    const request = bridge ? bridge.getInfo() : Promise.resolve({ supported: false } as const);
+    void request
+      .then((value) => {
+        if (!disposed) setInfo(value);
+      })
+      .catch(() => {
+        if (!disposed) setInfo({ supported: false });
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+  return info;
+}
+
+export function SafariAccessSetupButton() {
+  const { t } = useTranslation();
+
+  const info = useSafariAccessInfo();
+  if (!info?.supported) return null;
+  return (
+    <Button size="sm" variant="outline" onClick={() => window.dispatchEvent(new Event(OPEN_EVENT))}>
+      <SettingsIcon className="size-4" />
+      {t("onboarding:safariImportSetup")}
+    </Button>
+  );
+}
+
+/**
+ * Intro decisions are persisted, never permission claims. Full Disk Access is
+ * reported per launch by the desktop process that reads Safari's cookies.
+ */
+export function SafariAccessOnboarding({
+  children,
+  startup = false,
+}: {
+  children?: ReactNode;
+  /** The root opts automatic first-launch guidance into startup arbitration. */
+  startup?: boolean;
+}) {
+  const { t } = useTranslation();
+
+  const info = useSafariAccessInfo();
+  const [decision, setDecision] = useLocalStorage(SAFARI_ACCESS_STORAGE_KEY, "unseen", Decision);
+  const [revisit, setRevisit] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const generation = useRef(0);
+  const granted = info?.supported === true && info.fullDiskAccess === "granted";
+  // Once access is on there is nothing left to set up, so only a deliberate
+  // revisit opens the sheet; the stored decision is left untouched.
+  const wantsOpen = info?.supported === true && ((decision === "unseen" && !granted) || revisit);
+  const { open: startupOpen } = useAnnouncementSheetSlot(startup && wantsOpen && !revisit);
+  // Local setup and deliberate Settings revisits must not depend on the root's
+  // first-run gate or wait behind an automatic announcement.
+  const open = wantsOpen && (!startup || revisit || startupOpen);
+  const handedOff = useAnnouncementSheetSlotStore((state) => state.handedOff);
+
+  useEffect(() => {
+    const show = () => {
+      setStatus(null);
+      setRevisit(true);
+    };
+    window.addEventListener(OPEN_EVENT, show);
+    return () => {
+      generation.current++;
+      window.removeEventListener(OPEN_EVENT, show);
+    };
+  }, []);
+
+  const close = () => {
+    generation.current++;
+    setBusy(false);
+    setStatus(null);
+    setRevisit(false);
+    setDecision("later");
+  };
+  const run = async (action: "openSettings" | "revealApp") => {
+    if (busy) return;
+    const request = ++generation.current;
+    setBusy(true);
+    try {
+      const opened = await window.desktopBridge?.safariAccess?.[action]();
+      if (request !== generation.current) return;
+      setStatus(
+        opened
+          ? action === "openSettings"
+            ? STATUS.settingsOpened
+            : STATUS.appRevealed
+          : STATUS.openFailed,
+      );
+    } catch {
+      if (request === generation.current) setStatus(STATUS.openFailed);
+    } finally {
+      if (request === generation.current) setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      {info && (!wantsOpen || revisit || handedOff) ? children : null}
+      <Dialog
+        open={open}
+        onOpenChange={(value) => {
+          if (!value) close();
+        }}
+      >
+        <DialogPopup showCloseButton={false} initialFocus={sheetRef} className="max-w-[400px]">
+          <div ref={sheetRef} tabIndex={-1} className="min-h-0 overflow-y-auto outline-none">
+            <DialogHeader className="items-center gap-3 px-6 pt-7 pb-0 text-center">
+              <img
+                src={SAFARI_ICON_SRC}
+                alt=""
+                aria-hidden
+                draggable={false}
+                className="size-16 select-none drop-shadow-[0_6px_14px_rgba(0,0,0,0.18)]"
+              />
+              <DialogTitle className="mt-1">
+                {t("onboarding:bringYourSafariLoginsAlong")}
+              </DialogTitle>
+              <DialogDescription className="text-balance leading-relaxed">
+                {t("onboarding:synaraSBrowserCanPickUpSitesYouRe")}
+              </DialogDescription>
+            </DialogHeader>
+
+            {info?.supported && info.fullDiskAccess === "granted" ? (
+              <p className="mx-6 mt-5 text-ui leading-relaxed text-muted-foreground">
+                {t("onboarding:safariAccessGrantedPrefix")}{" "}
+                <span className="font-medium text-foreground">{info.appName}</span>
+                {t("onboarding:safariAccessGrantedSuffix")}
+              </p>
+            ) : info?.supported ? (
+              <ol className="mx-6 mt-5 space-y-3 text-ui leading-relaxed">
+                <Step n={1}>
+                  {t("onboarding:notification_open")}{" "}
+                  <span className="font-medium text-foreground">
+                    {t("onboarding:systemSettings")}
+                  </span>{" "}
+                  {t("onboarding:privacySecurityFullDiskAccess")}
+                </Step>
+                <Step n={2}>
+                  {t("onboarding:switchOn")}{" "}
+                  <span className="font-medium text-foreground">{info.appName}</span>.
+                  {info.appPath ? (
+                    <>
+                      {" "}
+                      {t("onboarding:notListed")}{" "}
+                      <button
+                        type="button"
+                        disabled={busy}
+                        title={info.appPath}
+                        onClick={() => {
+                          void run("revealApp");
+                        }}
+                        className="rounded-sm underline decoration-muted-foreground/40 underline-offset-[3px] transition-colors hover:text-foreground hover:decoration-current focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60"
+                      >
+                        {t("onboarding:showAppInFinder")}
+                      </button>{" "}
+                      {t("onboarding:andDragItIn")}
+                    </>
+                  ) : null}
+                </Step>
+                <Step n={3}>{t("onboarding:quitAndReopenSynara")}</Step>
+              </ol>
+            ) : null}
+
+            <p className="mx-6 mt-5 text-ui leading-relaxed text-muted-foreground/80">
+              {t("onboarding:fullDiskAccessIsABroadMacOSPermissionThat")}
+            </p>
+
+            {status ? (
+              <p role="status" className="mx-6 mt-3 text-ui leading-relaxed text-muted-foreground">
+                {status}
+              </p>
+            ) : null}
+
+            <DialogFooter className="mt-5 px-6 pb-6 pt-0">
+              <Button variant="ghost" onClick={close}>
+                {t("common:notNow")}
+              </Button>
+              <Button
+                disabled={busy}
+                onClick={() => {
+                  void run("openSettings");
+                }}
+              >
+                {t("onboarding:openSystemSettings")}
+              </Button>
+            </DialogFooter>
+          </div>
+        </DialogPopup>
+      </Dialog>
+    </>
+  );
+}
+
+function Step({ n, children }: { n: number; children: ReactNode }) {
+  return (
+    <li className="flex gap-3 text-muted-foreground">
+      <span
+        aria-hidden
+        className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-ui-sm font-medium tabular-nums text-foreground/70"
+      >
+        {n}
+      </span>
+      <span className="min-w-0">{children}</span>
+    </li>
+  );
+}
