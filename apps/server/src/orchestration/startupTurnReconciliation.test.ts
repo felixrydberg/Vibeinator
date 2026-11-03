@@ -76,6 +76,47 @@ const expectSessionCommands = (commands: ReturnType<typeof planRestartTurnReconc
   });
 
 describe("planRestartTurnReconciliation", () => {
+  it("pauses both running and idle goals without resuming already-paused goals", () => {
+    const commands = planRestartTurnReconciliation({
+      now: NOW,
+      threads: [
+        makeThread("running-goal", {
+          goal: "Finish work",
+          session: makeSession("running-goal"),
+          latestTurn: { state: "running" },
+        }),
+        makeThread("idle-goal", { goal: "Finish work" }),
+        makeThread("paused-goal", { goal: "Keep paused", goalPausedAt: NOW }),
+        makeThread("ordinary-chat"),
+      ],
+    });
+    expect(commands.filter((command) => command.type === "thread.meta.update")).toEqual([
+      expect.objectContaining({ threadId: "running-goal", goalPaused: true }),
+      expect.objectContaining({ threadId: "idle-goal", goalPaused: true }),
+    ]);
+    expect(commands.filter((command) => command.type === "thread.session.set")).toEqual([
+      expect.objectContaining({
+        threadId: "running-goal",
+        session: expect.objectContaining({ status: "interrupted", activeTurnId: null }),
+      }),
+    ]);
+    expect(commands.map((command) => command.type)).not.toContain("thread.turn.start");
+  });
+
+  it("cancels a persisted usage-limit wait even when no turn is running", () => {
+    expect(
+      planRestartTurnReconciliation({
+        now: NOW,
+        threads: [makeThread("waiting", { usageLimitRecovery: { id: "wait-1" } })],
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: "thread.usage-limit.cancel",
+        threadId: "waiting",
+        recoveryId: "wait-1",
+      }),
+    ]);
+  });
   it("leaves clean threads untouched (no active turn, no in-flight session, no open turn)", () => {
     const threads = [
       makeThread("idle-no-session"),
@@ -860,6 +901,37 @@ describe("findRestartOrphanedTasks", () => {
 });
 
 describe("reconcileRestartStuckTurns selection", () => {
+  it.each([false, true])(
+    "selects idle goals and fails closed on pause persistence errors (%s)",
+    async (writeFails) => {
+      const thread = makeThread("idle-goal", { goal: "Finish later" });
+      const dispatch = vi.fn(() =>
+        writeFails ? Effect.fail(new Error("pause write failed")) : Effect.void,
+      );
+      const run = Effect.runPromise(
+        reconcileRestartStuckTurns.pipe(
+          Effect.provideService(OrchestrationEngineService, {
+            getReadModel: () => Effect.succeed({ threads: [thread] }),
+            dispatch,
+          } as never),
+          Effect.provideService(ProjectionSnapshotQuery, {
+            getThreadDetailById: () => Effect.succeed(Option.some(thread)),
+          } as never),
+          Effect.provideService(ProjectionPendingInteractionRepository, {
+            listUnsettled: () => Effect.succeed([]),
+          } as never),
+          Effect.provideService(ProviderSessionRuntimeRepository, {
+            list: () => Effect.succeed([]),
+          } as never),
+        ),
+      );
+      if (writeFails) await expect(run).rejects.toThrow("pause write failed");
+      else await run;
+      expect(dispatch).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ type: "thread.meta.update", goalPaused: true }),
+      );
+    },
+  );
   it.each(["uncertain"] as const)(
     "finds %s callbacks on completed threads even with false summary flags",
     async (status) => {

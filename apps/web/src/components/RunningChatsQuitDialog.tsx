@@ -2,12 +2,10 @@
 // Purpose: Confirms desktop quit, including when no chats are running.
 // Layer: Root web overlay
 // Depends on: Base UI alert-dialog primitives, the ⌘P palette surface, the shared running spinner,
-// and the persisted "resume chats after quit" app setting.
+// and the shared running-chats confirmation copy.
 
 import { AlertDialog as AlertDialogPrimitive } from "@base-ui/react/alert-dialog";
-import { useId } from "react";
 
-import { useAppSettings } from "~/appSettings";
 import { APP_DISPLAY_NAME } from "~/branding";
 import { ThreadRunningSpinner } from "~/components/ThreadRunningSpinner";
 import {
@@ -18,7 +16,6 @@ import {
   AlertDialogViewport,
 } from "~/components/ui/alert-dialog";
 import { Button } from "~/components/ui/button";
-import { Checkbox } from "~/components/ui/checkbox";
 import { commandDialogPopupClassName } from "~/components/ui/command";
 import {
   runningChatsQuitCopy,
@@ -28,17 +25,12 @@ import {
 import { cn } from "~/lib/utils";
 import { useTranslation } from "~/i18n";
 
-export interface RunningChatsQuitDecision {
-  /** Remember the listed chats and continue them automatically on the next launch. */
-  readonly resume: boolean;
-}
-
 export interface RunningChatsQuitDialogProps {
   readonly chats: ReadonlyArray<RunningChatQuitSummary> | null;
   /** Quit was confirmed and is being finalized; the dialog stays visible but inert. */
   readonly quitting?: boolean;
   readonly onStay: () => void;
-  readonly onQuit: (decision: RunningChatsQuitDecision) => void;
+  readonly onQuit: () => void;
 }
 
 const uiFont = "font-[family-name:var(--font-ui-family)]";
@@ -103,13 +95,9 @@ function RunningChatsQuitDialogContent({
   readonly chats: ReadonlyArray<RunningChatQuitSummary>;
   readonly copy: RunningChatsQuitCopy;
   readonly quitting: boolean;
-  readonly onQuit: (decision: RunningChatsQuitDecision) => void;
+  readonly onQuit: () => void;
 }) {
   const { t } = useTranslation();
-
-  const { settings, updateSettings } = useAppSettings();
-  const resume = settings.resumeChatsAfterQuit;
-  const resumeCheckboxId = useId();
 
   return (
     <>
@@ -139,25 +127,6 @@ function RunningChatsQuitDialogContent({
         ) : null}
       </div>
       <div className={FOOTER_CLASS}>
-        {chats.length > 0 ? (
-          <label
-            htmlFor={resumeCheckboxId}
-            className={cn(
-              uiFont,
-              "flex min-w-0 cursor-pointer select-none items-center gap-2 px-1 text-ui font-normal leading-[18px] text-muted-foreground",
-            )}
-          >
-            <Checkbox
-              id={resumeCheckboxId}
-              checked={resume}
-              disabled={quitting}
-              onCheckedChange={(checked) => {
-                updateSettings({ resumeChatsAfterQuit: checked === true });
-              }}
-            />
-            <span className="truncate">{copy.resumeLabel}</span>
-          </label>
-        ) : null}
         <div className="ml-auto flex items-center gap-2">
           <AlertDialogClose
             autoFocus={chats.length === 0}
@@ -173,7 +142,7 @@ function RunningChatsQuitDialogContent({
             size="sm"
             className={cn(uiFont, "gap-1.5")}
             disabled={quitting}
-            onClick={() => onQuit({ resume: chats.length > 0 && resume })}
+            onClick={onQuit}
           >
             {copy.quitLabel}
             {chats.length > 0 ? (

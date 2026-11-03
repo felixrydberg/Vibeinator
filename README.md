@@ -2,7 +2,7 @@
 
 A desktop app for working with Codex and Claude while preserving project context across sessions and provider switches.
 
-Status: Synara's pinned desktop baseline has been imported. Storage and handoff changes are planned; the inherited behavior is still present.
+Status: the desktop baseline is adopted. Conversations restore paused after restart; storage and handoff changes remain planned.
 
 The [Synara audit](docs/SYNARA-AUDIT.md) maps the existing implementation and confirmed gaps. The [implementation draft](docs/IMPLEMENTATION-DRAFT.md) defines issues, dependencies, acceptance criteria, and milestone order. The [tracker](docs/IMPLEMENTATION-TRACKER.md) links twenty GitHub issues and records delivery state. The [adoption report](docs/BASELINE-ADOPTION.md) records passing checks and remaining qualification. [UPSTREAM.md](UPSTREAM.md) records the source revision and retained notices.
 
@@ -48,7 +48,7 @@ Extend the existing event store, schema, migrations, and UI projections where pr
 
 Persist user input before dispatch and incoming events before display. Preserve raw provider payloads alongside normalized messages, tool calls/results, timestamps, approvals, usage, errors, and interruption state. Context filtering must not delete stored history.
 
-Reconstruct the UI from SQLite on restart. Mark unfinished turns interrupted and goals paused. Database write failures stop dispatch and interrupt active work.
+Reconstruct the UI from SQLite on restart. Mark unfinished turns interrupted and goals paused. Require explicit Resume or new input before continuing restored coding work, including saved queues and usage-limit waits. See the implemented [restart policy](docs/RESTART-POLICY.md). Database write failures stop dispatch and interrupt active work.
 
 ## Embedded editor and Git review
 

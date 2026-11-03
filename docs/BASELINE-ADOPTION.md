@@ -51,4 +51,4 @@ Next acceptance work is live disposable Codex and Claude streaming, approve/deny
 
 ## Review and delivery
 
-The [implementation tracker](IMPLEMENTATION-TRACKER.md) links the twenty steps and their dependencies. Review [draft adoption PR #21](https://github.com/felixrydberg/Vibeinator/pull/21) on `codex/vib-001-desktop-baseline`; keep VIB-001 open until its qualification checks are satisfied. Subsequent changes get separate branches and PRs, merged in dependency order when complete. The first adoption PR remains a draft while baseline acceptance is open.
+The [implementation tracker](IMPLEMENTATION-TRACKER.md) links the twenty steps and their dependencies. [Adoption PR #21](https://github.com/felixrydberg/Vibeinator/pull/21) is merged into `main`; VIB-001 stays open for its remaining qualification checks. Subsequent changes get separate branches and PRs, merged in dependency order when complete.

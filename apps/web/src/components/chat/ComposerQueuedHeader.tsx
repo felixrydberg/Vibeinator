@@ -30,6 +30,7 @@ import { useTranslation } from "~/i18n";
 
 const PAUSE_DETAIL_BY_REASON: Record<QueuedComposerPauseReason, string> = {
   stopped: "Paused after you stopped the turn",
+  restart: "Paused after reopening the app",
   error: "Paused after an error",
   "usage-limit": "Paused: usage limit",
 };
@@ -54,13 +55,15 @@ function QueuedComposerPausedNotice({
       role="status"
       data-testid="queued-follow-up-paused-notice"
       // A user stop is expected and stays neutral; failures and limits get the warning tint.
-      className={pause.reason === "stopped" ? undefined : "bg-warning/8"}
+      className={
+        pause.reason === "stopped" || pause.reason === "restart" ? undefined : "bg-warning/8"
+      }
     >
       <ComposerStackedPanelRowMain>
         <PauseIcon
           aria-hidden
           className={
-            pause.reason === "stopped"
+            pause.reason === "stopped" || pause.reason === "restart"
               ? COMPOSER_STACKED_PANEL_ICON_CLASS_NAME
               : "size-3.5 shrink-0 text-warning"
           }

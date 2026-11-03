@@ -20,11 +20,70 @@ vi.mock("~/lib/wsHttpUrl", async (original) => ({
 const originalBridge = window.desktopBridge;
 const originalState = useStore.getState();
 
+const nativeApi = vi.hoisted(() => ({
+  orchestration: {
+    dispatchCommand: vi.fn(async () => undefined),
+    prepareQuitResume: vi.fn(async () => undefined),
+  },
+}));
+vi.mock("~/nativeApi", () => ({ readNativeApi: () => nativeApi }));
+
 afterEach(() => {
+  vi.clearAllMocks();
   setLanguagePreference("en");
   if (originalBridge) window.desktopBridge = originalBridge;
   else delete window.desktopBridge;
   useStore.setState(originalState, true);
+});
+
+it("quits running chats without offering or preparing automatic resume", async () => {
+  setLanguagePreference("en");
+  let request: ((payload: DesktopQuitConfirmationRequest) => void) | undefined;
+  const reply = vi.fn();
+  window.desktopBridge = {
+    onQuitConfirmationRequest: (listener) => {
+      request = listener;
+      return () => {
+        request = undefined;
+      };
+    },
+    replyQuitConfirmation: reply,
+  } as Pick<DesktopBridge, "onQuitConfirmationRequest" | "replyQuitConfirmation"> as DesktopBridge;
+  useStore.setState({
+    sidebarThreadSummaryById: {
+      running: { id: "running", title: "Saved work", hasLiveTailWork: true },
+    } as never,
+    threadSessionById: {},
+    threadShellById: {},
+  });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { enabled: false, retry: false } },
+  });
+  const screen = await render(
+    <QueryClientProvider client={queryClient}>
+      <RunningChatsQuitCoordinator />
+    </QueryClientProvider>,
+  );
+  try {
+    request?.({ requestId: "running-quit", presentation: "in-app" });
+    await expect.element(page.getByRole("alertdialog")).toBeVisible();
+    await expect.element(page.getByRole("checkbox")).not.toBeInTheDocument();
+    await expect.element(page.getByText("Saved work")).toBeVisible();
+    await page.getByRole("button", { name: "Quit", exact: true }).click();
+    expect(reply).toHaveBeenCalledWith({
+      requestId: "running-quit",
+      phase: "decision",
+      allow: true,
+    });
+    await vi.waitFor(() =>
+      expect(nativeApi.orchestration.dispatchCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "thread.turn.interrupt", threadId: "running" }),
+      ),
+    );
+    expect(nativeApi.orchestration.prepareQuitResume).not.toHaveBeenCalled();
+  } finally {
+    await screen.unmount();
+  }
 });
 
 it.each([

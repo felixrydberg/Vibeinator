@@ -140,6 +140,7 @@ function makePagingLayer(input: {
   } as unknown as OrchestrationEngineShape;
   const reactor = {
     start: Effect.void,
+    startProviderCommands: Effect.void,
     reconcileSettledOpenTurns: Effect.void,
   } satisfies OrchestrationReactorShape;
   const query = fakeProjectionSnapshotQuery({
@@ -313,6 +314,7 @@ describe("ProviderRuntimeReconcilerLive", () => {
     } as unknown as OrchestrationEngineShape;
     const reactor = {
       start: Effect.void,
+      startProviderCommands: Effect.void,
       reconcileSettledOpenTurns: Effect.void,
     } satisfies OrchestrationReactorShape;
     const snapshotQuery = {
@@ -403,6 +405,7 @@ describe("ProviderRuntimeReconcilerLive", () => {
     } as unknown as OrchestrationEngineShape;
     const reactor = {
       start: Effect.void,
+      startProviderCommands: Effect.void,
       reconcileSettledOpenTurns: Effect.void,
     } satisfies OrchestrationReactorShape;
     const snapshotQuery = {
@@ -488,6 +491,7 @@ describe("ProviderRuntimeReconcilerLive", () => {
     } as unknown as OrchestrationEngineShape;
     const reactor = {
       start: Effect.void,
+      startProviderCommands: Effect.void,
       reconcileSettledOpenTurns: Effect.sync(reconcileSettledOpenTurns),
     } satisfies OrchestrationReactorShape;
     const snapshotQuery = {
