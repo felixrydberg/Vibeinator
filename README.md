@@ -44,6 +44,8 @@ Provide projects/chats, a streaming conversation with expandable tool activity, 
 
 SQLite is the full source of truth. Store projects, chats, goals, turns, provider sessions, ordered events, summary revisions, and classification results in application data. Enable foreign keys, WAL, transactional migrations, and FTS5 history search.
 
+The [durable information contract](docs/DURABLE-INFORMATION.md) defines the storage records, source identities, migration/backout rules and synthetic upgrade fixtures. Full conversation and objective text belongs in SQLite. Binary attachment bytes remain in the existing managed file store with durable SQLite metadata, availability and references; a SQLite-only backup does not include those external bytes. Retain WAL/NORMAL durability across process crashes; recent commits may be lost after an OS crash or power failure.
+
 Extend the existing event store, schema, migrations, and UI projections where practical. Audit which raw and normalized events Synara already persists, then add the missing capture and metadata at those boundaries. Maintain one authoritative conversation history and keep retained UI projections consistent with it. Schema changes must preserve existing conversations and be verified against a database from the pinned baseline.
 
 Persist user input before dispatch and incoming events before display. Preserve raw provider payloads alongside normalized messages, tool calls/results, timestamps, approvals, usage, errors, and interruption state. Context filtering must not delete stored history.
