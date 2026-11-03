@@ -32,6 +32,9 @@ jobs:
       - run: bun run lint
       - run: bun run typecheck
       - run: bun run windows-runtime:check
+      - run: bun run migrations:check
+      - name: Durable migration fixtures and recovery
+        run: bun run --cwd apps/server test src/persistence/DurableMigrationFixtures.test.ts src/persistence/Migrations.test.ts src/persistence/Migrations/MigrationReplay.test.ts src/persistence/MigrationBackup.test.ts src/persistence/NodeSqliteClient.test.ts
       - name: Full unit suite on Linux
         if: runner.os == 'Linux'
         run: bun run test

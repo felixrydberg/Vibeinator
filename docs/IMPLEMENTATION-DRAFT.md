@@ -20,7 +20,7 @@ This draft proposes implementation boundaries; file/table names for new code are
 | Large content        | Chunked SQLite payloads and complete goal text; existing managed attachments retain their lifecycle until a separate decision changes it | No silent truncation or broken objective references; attachment migration is not hidden in the first schema change |
 | Execution on restart | Conversations restore, orphaned turns settle, active goals become paused; no new coding continuation without an explicit user action     | Matches the README and avoids inherited restart paths bypassing it                                                 |
 
-VIB-003 must settle the attachment boundary explicitly: the README's SQLite source-of-truth statement requires complete conversation/goal content and durable attachment metadata/references. If it is intended to require every image/browser artifact byte inside SQLite too, include that in VIB-004's sizing and migration contract before implementation. Do not silently choose a lossy or untracked file-backed archive.
+VIB-003 settles the attachment boundary in the [durable information contract](DURABLE-INFORMATION.md): complete conversation/objective text and durable attachment metadata/references belong in SQLite; binary attachments keep the existing managed-file lifecycle and explicit availability. A SQLite-only backup does not recover external attachment bytes. The contract also fixes process-crash durability, identities, source/revision/packet invariants and additive upgrade/backout rules for subsequent issues.
 
 ## Retained components and extension points
 
