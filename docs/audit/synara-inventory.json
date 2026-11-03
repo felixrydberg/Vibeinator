@@ -1,0 +1,643 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-03",
+  "repository": "https://github.com/Emanuele-web04/synara",
+  "revision": "3e72c70af1f9bfe1fdf3eeafd7fa9e0ba0d5f3b4",
+  "trackedPaths": 9366,
+  "trackedPathListSha256": "93ba5e4fc31a1b06aee00fb2a08dca212f8335c530efcfec9f24d52491b63081",
+  "scope": "All tracked paths inventoried; repository-wide architecture searches and deep critical-path review. Not every file read line by line.",
+  "workspaces": [
+    {
+      "path": "apps/desktop",
+      "name": "@synara/desktop",
+      "trackedFiles": 330,
+      "jsTsFamilyFiles": 282,
+      "testSpecBrowserNamedFiles": 124,
+      "manifestSha256": "1764729c3e43c866cfed320b8d8b699a257383da927786862b0126da6e5de582",
+      "scripts": {
+        "dev": "bun run scripts/dev.mjs",
+        "dev:bundle": "tsdown --watch",
+        "dev:electron": "bun run scripts/dev-electron.mjs",
+        "build": "tsdown",
+        "start": "bun run scripts/start-electron.mjs",
+        "typecheck": "node ../../node_modules/@typescript/native/bin/tsc --noEmit --tsBuildInfoFile node_modules/.cache/typescript-native.tsbuildinfo && bun run typecheck:fixtures",
+        "typecheck:fixtures": "node ../../node_modules/@typescript/native/bin/tsc --project tsconfig.fixtures.json",
+        "typecheck:native": "bun run typecheck",
+        "typecheck:legacy": "tsc --noEmit && tsc --project tsconfig.fixtures.json",
+        "test": "vitest run --passWithNoTests",
+        "smoke-test": "node scripts/smoke-test.mjs",
+        "smoke:browser-lifecycle": "bun build scripts/browser-lifecycle-smoke.ts --target=node --external=electron --external=betterwright --external=betterwright/* --external=ws --external=effect --outfile=.smoke/browser-lifecycle.mjs && electron .smoke/browser-lifecycle.mjs",
+        "smoke:browser-viewport": "bun build scripts/browser-viewport-smoke.ts --target=node --external=electron --external=betterwright --outfile=.smoke/browser-viewport.mjs && electron .smoke/browser-viewport.mjs"
+      },
+      "dependencies": {
+        "betterwright": "2.7.3",
+        "effect": "catalog:",
+        "electron": "43.4.1",
+        "electron-updater": "^6.6.2",
+        "i18next": "26.4.4",
+        "undici": "8.10.2",
+        "ws": "^8.21.0"
+      },
+      "devDependencies": {
+        "@synara/contracts": "workspace:*",
+        "@synara/shared": "workspace:*",
+        "@types/node": "catalog:",
+        "@types/ws": "^8.5.13",
+        "tsdown": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+        "wait-on": "^8.0.2"
+      }
+    },
+    {
+      "path": "apps/server",
+      "name": "@synara/cli",
+      "trackedFiles": 1510,
+      "jsTsFamilyFiles": 1490,
+      "testSpecBrowserNamedFiles": 620,
+      "manifestSha256": "9920d5cbf177d95d198656a0ed3e797392c5e9947a8f9fc5c477a578d336684c",
+      "scripts": {
+        "dev": "bun run src/index.ts",
+        "build": "node scripts/cli.ts build",
+        "start": "node dist/index.mjs",
+        "typecheck": "node ../../node_modules/@typescript/native/bin/tsc --noEmit --tsBuildInfoFile node_modules/.cache/typescript-native.tsbuildinfo",
+        "typecheck:native": "bun run typecheck",
+        "typecheck:legacy": "tsc --noEmit",
+        "test": "vitest run --maxWorkers=1 --no-file-parallelism"
+      },
+      "dependencies": {
+        "@agentclientprotocol/sdk": "1.2.1",
+        "@anthropic-ai/claude-agent-sdk": "0.3.296",
+        "@anthropic-ai/sdk": "^0.100.0",
+        "@earendil-works/pi-agent-core": "^1.4.0",
+        "@earendil-works/pi-ai": "^1.4.0",
+        "@earendil-works/pi-coding-agent": "^1.4.0",
+        "@effect/platform-node": "catalog:",
+        "@effect/sql-sqlite-bun": "catalog:",
+        "@modelcontextprotocol/sdk": "1.29.0",
+        "@opencode-ai/sdk": "1.18.31",
+        "@opencode/client": "2.0.25",
+        "@pierre/diffs": "^1.2.12",
+        "@xterm/headless": "^6.0.0",
+        "effect": "catalog:",
+        "mdast-util-from-markdown": "^2.0.3",
+        "node-pty": "^1.1.0",
+        "open": "^10.1.0",
+        "smol-toml": "^1.7.0",
+        "typescript": "catalog:",
+        "ws": "^8.21.0",
+        "yaml": "^2.8.3",
+        "zod": "4.3.6"
+      },
+      "devDependencies": {
+        "@effect/language-service": "catalog:",
+        "@effect/vitest": "catalog:",
+        "@synara/contracts": "workspace:*",
+        "@synara/shared": "workspace:*",
+        "@synara/web": "workspace:*",
+        "@types/bun": "catalog:",
+        "@types/node": "catalog:",
+        "@types/ws": "^8.5.13",
+        "tsdown": "catalog:",
+        "vitest": "catalog:"
+      }
+    },
+    {
+      "path": "apps/web",
+      "name": "@synara/web",
+      "trackedFiles": 6036,
+      "jsTsFamilyFiles": 1999,
+      "testSpecBrowserNamedFiles": 704,
+      "manifestSha256": "2a2b2e7c4a9fc05c3f8ead7bcd63d24cd8b505180de883cb7ebec28b8e3a6241",
+      "scripts": {
+        "dev": "vite",
+        "build": "vite build",
+        "preview": "vite preview",
+        "typecheck": "node ../../node_modules/@typescript/native/bin/tsc --noEmit --tsBuildInfoFile node_modules/.cache/typescript-native.tsbuildinfo",
+        "typecheck:native": "bun run typecheck",
+        "typecheck:legacy": "tsc --noEmit",
+        "test": "vitest run --passWithNoTests",
+        "test:browser": "vitest run --config vitest.browser.config.ts",
+        "test:browser:stable": "vitest run --config vitest.browser.stable.config.ts",
+        "test:browser:ci": "vitest run --config vitest.browser.ci.config.ts",
+        "test:browser:geometry": "vitest run --config vitest.browser.geometry.config.ts",
+        "test:editor:e2e": "playwright test --config playwright.editor.config.ts",
+        "test:electron:e2e": "playwright test --config playwright.electron.config.ts",
+        "test:browser:install": "playwright install --with-deps chromium",
+        "measure:lcp": "node scripts/measure-lcp.mjs"
+      },
+      "dependencies": {
+        "@base-ui/react": "^1.5.0",
+        "@dnd-kit/core": "^6.3.1",
+        "@dnd-kit/modifiers": "^9.0.0",
+        "@dnd-kit/sortable": "^10.0.0",
+        "@dnd-kit/utilities": "^3.2.2",
+        "@fontsource-variable/jetbrains-mono": "^5.2.8",
+        "@formkit/auto-animate": "^0.9.0",
+        "@legendapp/list": "3.3.3",
+        "@lexical/react": "^0.41.0",
+        "@pierre/diffs": "1.3.5",
+        "@synara/contracts": "workspace:*",
+        "@synara/shared": "workspace:*",
+        "@tabler/icons-react": "^3.44.0",
+        "@tanstack/react-pacer": "^0.19.4",
+        "@tanstack/react-query": "^5.90.0",
+        "@tanstack/react-router": "^1.160.2",
+        "@tanstack/react-virtual": "^3.13.18",
+        "@xterm/addon-clipboard": "0.2.0",
+        "@xterm/addon-fit": "^0.11.0",
+        "@xterm/addon-image": "0.9.0",
+        "@xterm/addon-ligatures": "0.10.0",
+        "@xterm/addon-search": "^0.16.0",
+        "@xterm/addon-unicode11": "^0.9.0",
+        "@xterm/addon-webgl": "^0.19.0",
+        "@xterm/xterm": "^6.0.0",
+        "class-variance-authority": "^0.7.1",
+        "effect": "catalog:",
+        "html-to-image": "^1.11.13",
+        "i18next": "^26.4.4",
+        "katex": "^0.16.45",
+        "lexical": "^0.41.0",
+        "micromark-util-decode-string": "2.0.1",
+        "monaco-editor": "0.57.0",
+        "pdfjs-dist": "^5.4.296",
+        "react": "^19.0.0",
+        "react-colorful": "^5.6.1",
+        "react-dom": "^19.0.0",
+        "react-i18next": "^17.0.16",
+        "react-icons": "^5.6.0",
+        "react-markdown": "^10.1.0",
+        "rehype-katex": "^7.0.1",
+        "rehype-raw": "^7.0.0",
+        "rehype-sanitize": "^6.0.0",
+        "remark-breaks": "^4.0.0",
+        "remark-gfm": "^4.0.1",
+        "remark-math": "^6.0.0",
+        "shadcn": "^4.8.3",
+        "tailwind-merge": "^3.6.0",
+        "zustand": "^5.0.11"
+      },
+      "devDependencies": {
+        "@babel/core": "^8.0.1",
+        "@effect/language-service": "catalog:",
+        "@rolldown/plugin-babel": "^0.2.0",
+        "@tailwindcss/vite": "^4.0.0",
+        "@tanstack/router-plugin": "^1.161.0",
+        "@types/babel__core": "^7.20.5",
+        "@types/mdast": "4.0.4",
+        "@types/react": "^19.0.0",
+        "@types/react-dom": "^19.0.0",
+        "@vitejs/plugin-react": "^6.0.0",
+        "@vitest/browser-playwright": "^4.1.10",
+        "babel-plugin-react-compiler": "1.0.0",
+        "msw": "2.12.11",
+        "playwright": "^1.58.2",
+        "tailwindcss": "^4.0.0",
+        "typescript": "catalog:",
+        "vite": "^8.1.4",
+        "vitest": "catalog:",
+        "vitest-browser-react": "^2.0.5"
+      }
+    },
+    {
+      "path": "apps/marketing",
+      "name": "@synara/marketing",
+      "trackedFiles": 256,
+      "jsTsFamilyFiles": 122,
+      "testSpecBrowserNamedFiles": 14,
+      "manifestSha256": "7c3dc2f16ba407f5b3954b3e60ef305cafefc01b31ffe02a9b80fa2c2708aa25",
+      "scripts": {
+        "dev": "next dev --port 4322",
+        "build": "next build",
+        "start": "next start",
+        "downloads:update": "node scripts/update-installer-downloads.mjs",
+        "lint": "eslint",
+        "test:docs": "node --test scripts/*.test.mjs && node scripts/check-docs.mjs",
+        "test:links": "node scripts/check-external-links.mjs",
+        "test:seo-smoke": "node scripts/seo-smoke.mjs",
+        "test:e2e": "playwright test tests/e2e",
+        "test:visual": "playwright test tests/visual --grep @visual",
+        "test:visual:update": "playwright test tests/visual --grep @visual --update-snapshots",
+        "test:a11y": "playwright test tests/a11y",
+        "test:performance": "node scripts/performance-smoke.mjs",
+        "typecheck": "node ../../node_modules/@typescript/native/bin/tsc --noEmit --tsBuildInfoFile node_modules/.cache/typescript-native.tsbuildinfo",
+        "typecheck:native": "bun run typecheck",
+        "typecheck:legacy": "tsc --noEmit",
+        "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+        "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+        "postinstall": "fumadocs-mdx"
+      },
+      "dependencies": {
+        "@base-ui/react": "^1.6.0",
+        "class-variance-authority": "^0.7.1",
+        "clsx": "^2.1.1",
+        "fumadocs-core": "16.11.5",
+        "fumadocs-mdx": "15.2.0",
+        "fumadocs-ui": "16.11.5",
+        "lucide-react": "^1.25.0",
+        "next": "16.3.0",
+        "react": "19.2.4",
+        "react-dom": "19.2.4",
+        "react-icons": "^5.6.0",
+        "react-tweet": "^3.3.1",
+        "resend": "^6.17.2",
+        "shadcn": "^4.16.1",
+        "tailwind-merge": "^3.6.0",
+        "tw-animate-css": "^1.4.0"
+      },
+      "devDependencies": {
+        "@axe-core/playwright": "^4.12.1",
+        "@opennextjs/cloudflare": "^1.20.2",
+        "@playwright/test": "^1.62.1",
+        "@tailwindcss/postcss": "4.2.2",
+        "@types/mdx": "^2.0.14",
+        "@types/node": "catalog:",
+        "@types/react": "^19",
+        "@types/react-dom": "^19",
+        "eslint": "^9",
+        "eslint-config-next": "16.3.0",
+        "playwright-core": "^1.62.1",
+        "tailwindcss": "4.2.2",
+        "typescript": "catalog:",
+        "wrangler": "^4.122.0"
+      }
+    },
+    {
+      "path": "packages/contracts",
+      "name": "@synara/contracts",
+      "trackedFiles": 91,
+      "jsTsFamilyFiles": 89,
+      "testSpecBrowserNamedFiles": 27,
+      "manifestSha256": "c0dc02418d7947826bdb2967fb47ec711ad7b83614083b055738aef7815b325d",
+      "scripts": {
+        "dev": "tsdown src/index.ts --format cjs --watch --clean",
+        "build": "tsdown src/index.ts --format esm,cjs --dts --clean",
+        "typecheck": "node ../../node_modules/@typescript/native/bin/tsc --noEmit",
+        "typecheck:native": "bun run typecheck",
+        "typecheck:legacy": "tsc --noEmit",
+        "test": "vitest run"
+      },
+      "dependencies": {
+        "effect": "catalog:"
+      },
+      "devDependencies": {
+        "@effect/language-service": "catalog:",
+        "@effect/vitest": "catalog:",
+        "tsdown": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:"
+      }
+    },
+    {
+      "path": "packages/shared",
+      "name": "@synara/shared",
+      "trackedFiles": 256,
+      "jsTsFamilyFiles": 226,
+      "testSpecBrowserNamedFiles": 105,
+      "manifestSha256": "b2831e9ca9a4a0a3724b4e5496a191d3c5acbcbb8c414c5834b98b833596d1ca",
+      "scripts": {
+        "typecheck": "node ../../node_modules/@typescript/native/bin/tsc --noEmit",
+        "typecheck:native": "bun run typecheck",
+        "typecheck:legacy": "tsc --noEmit",
+        "test": "vitest run"
+      },
+      "dependencies": {
+        "@synara/contracts": "workspace:*",
+        "effect": "catalog:"
+      },
+      "devDependencies": {
+        "@effect/language-service": "catalog:",
+        "@effect/vitest": "catalog:",
+        "@types/node": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:"
+      }
+    },
+    {
+      "path": "scripts",
+      "name": "@synara/scripts",
+      "trackedFiles": 141,
+      "jsTsFamilyFiles": 119,
+      "testSpecBrowserNamedFiles": 38,
+      "manifestSha256": "2e1e457a1544b44902935fd122e7c90a95fb5488f1619d23a027e18e403db046",
+      "scripts": {
+        "typecheck": "node ../node_modules/@typescript/native/bin/tsc --noEmit --tsBuildInfoFile node_modules/.cache/typescript-native.tsbuildinfo && bun run typecheck:computer-measurement",
+        "typecheck:computer-measurement": "node ../node_modules/@typescript/native/bin/tsc --project tsconfig.computer-measurement.json",
+        "typecheck:native": "bun run typecheck",
+        "typecheck:legacy": "tsc --noEmit",
+        "test": "vitest run"
+      },
+      "dependencies": {
+        "@effect/platform-node": "catalog:",
+        "@synara/contracts": "workspace:*",
+        "@synara/shared": "workspace:*",
+        "effect": "catalog:"
+      },
+      "devDependencies": {
+        "@effect/language-service": "catalog:",
+        "@effect/vitest": "catalog:",
+        "@types/bun": "catalog:",
+        "electron-builder": "26.15.3",
+        "typescript": "catalog:",
+        "vitest": "catalog:"
+      }
+    }
+  ],
+  "sourceDomains": {
+    "apps/desktop/src/(root)": {
+      "files": 176,
+      "testSpecBrowserNamedFiles": 85,
+      "linesIncludingTests": 52882
+    },
+    "apps/desktop/src/browserAnnotations": {
+      "files": 10,
+      "testSpecBrowserNamedFiles": 3,
+      "linesIncludingTests": 3576
+    },
+    "apps/desktop/src/browserAutomation": {
+      "files": 52,
+      "testSpecBrowserNamedFiles": 26,
+      "linesIncludingTests": 16326
+    },
+    "apps/desktop/src/browserWebMcp": {
+      "files": 4,
+      "testSpecBrowserNamedFiles": 3,
+      "linesIncludingTests": 1079
+    },
+    "apps/desktop/src/cuaFixtures": {
+      "files": 7,
+      "testSpecBrowserNamedFiles": 1,
+      "linesIncludingTests": 2796
+    },
+    "apps/desktop/src/fixtures": {
+      "files": 1,
+      "testSpecBrowserNamedFiles": 0,
+      "linesIncludingTests": 102
+    },
+    "apps/marketing/src/app": {
+      "files": 25,
+      "testSpecBrowserNamedFiles": 0,
+      "linesIncludingTests": 2094
+    },
+    "apps/marketing/src/components": {
+      "files": 43,
+      "testSpecBrowserNamedFiles": 0,
+      "linesIncludingTests": 3383
+    },
+    "apps/marketing/src/data": {
+      "files": 6,
+      "testSpecBrowserNamedFiles": 0,
+      "linesIncludingTests": 5476
+    },
+    "apps/marketing/src/lib": {
+      "files": 20,
+      "testSpecBrowserNamedFiles": 0,
+      "linesIncludingTests": 1718
+    },
+    "apps/server/src/agentGateway": {
+      "files": 108,
+      "testSpecBrowserNamedFiles": 46,
+      "linesIncludingTests": 49714
+    },
+    "apps/server/src/(root)": {
+      "files": 206,
+      "testSpecBrowserNamedFiles": 102,
+      "linesIncludingTests": 77370
+    },
+    "apps/server/src/auth": {
+      "files": 21,
+      "testSpecBrowserNamedFiles": 7,
+      "linesIncludingTests": 3175
+    },
+    "apps/server/src/automation": {
+      "files": 16,
+      "testSpecBrowserNamedFiles": 4,
+      "linesIncludingTests": 12363
+    },
+    "apps/server/src/browserAutomation": {
+      "files": 4,
+      "testSpecBrowserNamedFiles": 1,
+      "linesIncludingTests": 760
+    },
+    "apps/server/src/checkpointing": {
+      "files": 11,
+      "testSpecBrowserNamedFiles": 4,
+      "linesIncludingTests": 3065
+    },
+    "apps/server/src/computer": {
+      "files": 83,
+      "testSpecBrowserNamedFiles": 43,
+      "linesIncludingTests": 33144
+    },
+    "apps/server/src/device": {
+      "files": 40,
+      "testSpecBrowserNamedFiles": 23,
+      "linesIncludingTests": 13028
+    },
+    "apps/server/src/diagnostics": {
+      "files": 5,
+      "testSpecBrowserNamedFiles": 2,
+      "linesIncludingTests": 512
+    },
+    "apps/server/src/editor": {
+      "files": 14,
+      "testSpecBrowserNamedFiles": 6,
+      "linesIncludingTests": 2693
+    },
+    "apps/server/src/environment": {
+      "files": 4,
+      "testSpecBrowserNamedFiles": 1,
+      "linesIncludingTests": 152
+    },
+    "apps/server/src/externalMcp": {
+      "files": 29,
+      "testSpecBrowserNamedFiles": 12,
+      "linesIncludingTests": 8173
+    },
+    "apps/server/src/fixtures": {
+      "files": 2,
+      "testSpecBrowserNamedFiles": 0,
+      "linesIncludingTests": 39
+    },
+    "apps/server/src/git": {
+      "files": 51,
+      "testSpecBrowserNamedFiles": 21,
+      "linesIncludingTests": 36890
+    },
+    "apps/server/src/githubInbox": {
+      "files": 5,
+      "testSpecBrowserNamedFiles": 1,
+      "linesIncludingTests": 2396
+    },
+    "apps/server/src/mcpConnectors": {
+      "files": 10,
+      "testSpecBrowserNamedFiles": 4,
+      "linesIncludingTests": 3318
+    },
+    "apps/server/src/orchestration": {
+      "files": 151,
+      "testSpecBrowserNamedFiles": 79,
+      "linesIncludingTests": 132148
+    },
+    "apps/server/src/persistence": {
+      "files": 277,
+      "testSpecBrowserNamedFiles": 71,
+      "linesIncludingTests": 44402
+    },
+    "apps/server/src/platform": {
+      "files": 12,
+      "testSpecBrowserNamedFiles": 7,
+      "linesIncludingTests": 2999
+    },
+    "apps/server/src/project": {
+      "files": 7,
+      "testSpecBrowserNamedFiles": 3,
+      "linesIncludingTests": 1406
+    },
+    "apps/server/src/projectAgent": {
+      "files": 29,
+      "testSpecBrowserNamedFiles": 11,
+      "linesIncludingTests": 19324
+    },
+    "apps/server/src/provider": {
+      "files": 274,
+      "testSpecBrowserNamedFiles": 122,
+      "linesIncludingTests": 166579
+    },
+    "apps/server/src/providerUsage": {
+      "files": 41,
+      "testSpecBrowserNamedFiles": 20,
+      "linesIncludingTests": 10844
+    },
+    "apps/server/src/pullRequestAutoFix": {
+      "files": 5,
+      "testSpecBrowserNamedFiles": 2,
+      "linesIncludingTests": 1436
+    },
+    "apps/server/src/pullRequests": {
+      "files": 11,
+      "testSpecBrowserNamedFiles": 3,
+      "linesIncludingTests": 1744
+    },
+    "apps/server/src/server": {
+      "files": 1,
+      "testSpecBrowserNamedFiles": 0,
+      "linesIncludingTests": 72
+    },
+    "apps/server/src/stream": {
+      "files": 2,
+      "testSpecBrowserNamedFiles": 1,
+      "linesIncludingTests": 171
+    },
+    "apps/server/src/terminal": {
+      "files": 29,
+      "testSpecBrowserNamedFiles": 12,
+      "linesIncludingTests": 8663
+    },
+    "apps/server/src/todo": {
+      "files": 4,
+      "testSpecBrowserNamedFiles": 1,
+      "linesIncludingTests": 396
+    },
+    "apps/server/src/workspace": {
+      "files": 14,
+      "testSpecBrowserNamedFiles": 3,
+      "linesIncludingTests": 2417
+    },
+    "apps/web/src/(root)": {
+      "files": 264,
+      "testSpecBrowserNamedFiles": 115,
+      "linesIncludingTests": 92309
+    },
+    "apps/web/src/assets": {
+      "files": 1,
+      "testSpecBrowserNamedFiles": 0,
+      "linesIncludingTests": 9
+    },
+    "apps/web/src/components": {
+      "files": 1072,
+      "testSpecBrowserNamedFiles": 340,
+      "linesIncludingTests": 300068
+    },
+    "apps/web/src/featureTour": {
+      "files": 3,
+      "testSpecBrowserNamedFiles": 0,
+      "linesIncludingTests": 233
+    },
+    "apps/web/src/hooks": {
+      "files": 130,
+      "testSpecBrowserNamedFiles": 47,
+      "linesIncludingTests": 21823
+    },
+    "apps/web/src/i18n": {
+      "files": 9,
+      "testSpecBrowserNamedFiles": 5,
+      "linesIncludingTests": 768
+    },
+    "apps/web/src/lib": {
+      "files": 404,
+      "testSpecBrowserNamedFiles": 175,
+      "linesIncludingTests": 68658
+    },
+    "apps/web/src/notifications": {
+      "files": 5,
+      "testSpecBrowserNamedFiles": 2,
+      "linesIncludingTests": 2892
+    },
+    "apps/web/src/onboarding": {
+      "files": 17,
+      "testSpecBrowserNamedFiles": 1,
+      "linesIncludingTests": 2239
+    },
+    "apps/web/src/projectImport": {
+      "files": 10,
+      "testSpecBrowserNamedFiles": 1,
+      "linesIncludingTests": 1099
+    },
+    "apps/web/src/routes": {
+      "files": 34,
+      "testSpecBrowserNamedFiles": 7,
+      "linesIncludingTests": 12500
+    },
+    "apps/web/src/test": {
+      "files": 4,
+      "testSpecBrowserNamedFiles": 0,
+      "linesIncludingTests": 393
+    },
+    "apps/web/src/theme": {
+      "files": 3,
+      "testSpecBrowserNamedFiles": 1,
+      "linesIncludingTests": 2879
+    },
+    "apps/web/src/whatsNew": {
+      "files": 7,
+      "testSpecBrowserNamedFiles": 1,
+      "linesIncludingTests": 6418
+    },
+    "packages/contracts/src/(root)": {
+      "files": 89,
+      "testSpecBrowserNamedFiles": 27,
+      "linesIncludingTests": 27715
+    },
+    "packages/shared/src/(root)": {
+      "files": 226,
+      "testSpecBrowserNamedFiles": 105,
+      "linesIncludingTests": 33255
+    },
+    "scripts/(root)": {
+      "files": 51,
+      "testSpecBrowserNamedFiles": 21,
+      "linesIncludingTests": 12237
+    },
+    "scripts/computer-use-fixtures": {
+      "files": 28,
+      "testSpecBrowserNamedFiles": 4,
+      "linesIncludingTests": 11498
+    },
+    "scripts/lib": {
+      "files": 40,
+      "testSpecBrowserNamedFiles": 13,
+      "linesIncludingTests": 4343
+    }
+  }
+}

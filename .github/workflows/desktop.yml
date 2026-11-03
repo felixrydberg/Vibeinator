@@ -1,0 +1,58 @@
+name: Desktop
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run fmt:check
+      - run: bun run lint
+      - run: bun run typecheck
+      - run: bun run windows-runtime:check
+      - name: Full unit suite on Linux
+        if: runner.os == 'Linux'
+        run: bun run test
+      # The inherited full suite includes Unix sockets and POSIX path/mode fixtures.
+      # Keep the Windows adoption checks explicit; remaining qualification is VIB-001.
+      - name: Windows contracts
+        if: runner.os == 'Windows'
+        run: bun run test --filter=@synara/contracts
+      - name: Windows shared identity
+        if: runner.os == 'Windows'
+        run: bun run test --filter=@synara/shared -- desktopIdentity.test.ts synaraHome.test.ts betaFeatures.test.ts
+      - name: Windows build and publication policy
+        if: runner.os == 'Windows'
+        run: bun run test --filter=@synara/scripts -- desktop-artifact-identity.test.ts desktop-publish-config.test.ts build-desktop-artifact-mac-config.test.ts dev-runner.test.ts i18n.test.ts verify-packaged-desktop-startup.test.ts
+      - name: Windows desktop boundaries
+        if: runner.os == 'Windows'
+        run: bun run test --filter=@synara/desktop -- betaChannel.test.ts betaInstaller.test.ts source-desktop-launch.test.mjs clipboardPermissions.test.ts mediaPermissions.test.ts desktopStaticProtocol.test.ts subframeNavigationGuard.test.ts backendShutdown.windows.integration.test.ts
+      - name: Windows backend homes
+        if: runner.os == 'Windows'
+        run: bun run test --filter=@synara/cli -- codexHomePaths.test.ts providerChildEnvironment.test.ts
+      - run: bun run build
+      - name: Windows desktop startup
+        if: runner.os == 'Windows'
+        run: bun run test:desktop-smoke
