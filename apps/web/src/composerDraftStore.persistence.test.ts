@@ -24,6 +24,26 @@ import {
 } from "./lib/terminalContext";
 
 describe("composerDraftStore persisted-state hydration", () => {
+  it("restores saved queues paused even if they were resumed before shutdown", () => {
+    resetComposerDraftStore();
+    const threadId = ThreadId.makeUnsafe("restart-paused-queue");
+    const store = useComposerDraftStore.getState();
+    store.enqueueQueuedTurn(threadId, makeQueuedChatTurn("saved-prompt"));
+    store.resumeQueuedTurns(threadId, "old-turn");
+    const persisted = partializeComposerDraftStoreState(useComposerDraftStore.getState());
+    const merge = useComposerDraftStore.persist.getOptions().merge!;
+    const restored = merge(persisted, useComposerDraftStore.getState());
+    expect(restored.draftsByThreadId[threadId]).toMatchObject({
+      queueStoppedTurnId: "application-restart",
+      queueResumedTurnId: null,
+    });
+    expect(restored.draftsByThreadId[threadId]?.queuedTurns[0]?.id).toBe("saved-prompt");
+    useComposerDraftStore.setState(restored);
+    useComposerDraftStore.getState().resumeQueuedTurns(threadId, "application-restart");
+    expect(
+      useComposerDraftStore.getState().draftsByThreadId[threadId]?.queueStoppedTurnId,
+    ).toBeNull();
+  });
   it("keeps the queue stop and resume markers only while the queue has entries", () => {
     resetComposerDraftStore();
     const threadId = ThreadId.makeUnsafe("thread-queue-resume");

@@ -61,6 +61,31 @@ describe("server runtime pipeline shutdown", () => {
 });
 
 describe("server runtime pipeline startup", () => {
+  it("does not start provider commands if restart state cannot be persisted", async () => {
+    const order: string[] = [];
+    await expect(
+      Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const scope = yield* Effect.scope;
+            yield* startServerRuntimePipeline({
+              orchestrationReactor: {
+                start: Effect.void,
+                startProviderCommands: Effect.sync(() => {
+                  order.push("provider-dispatch");
+                }),
+                reconcileSettledOpenTurns: Effect.void,
+              },
+              reconcileRestartStuckTurns: Effect.die(new Error("restart write failed")),
+              reactors: [],
+              subscriptionsScope: scope,
+            });
+          }),
+        ),
+      ),
+    ).rejects.toThrow("restart write failed");
+    expect(order).toEqual([]);
+  });
   it("settles restart-orphaned turns before background reactors start", async () => {
     const order: string[] = [];
     const reactor = (name: string) => ({
@@ -72,6 +97,7 @@ describe("server runtime pipeline startup", () => {
       startServerRuntimePipeline({
         orchestrationReactor: {
           start: Effect.sync(() => void order.push("runtime-journal-replayed")),
+          startProviderCommands: Effect.sync(() => void order.push("provider-commands-started")),
           reconcileSettledOpenTurns: Effect.sync(() => void order.push("open-turn-ledger-pruned")),
         },
         reconcileRestartStuckTurns: Effect.sync(() => void order.push("restart-turns-settled")),
@@ -84,6 +110,7 @@ describe("server runtime pipeline startup", () => {
       "runtime-journal-replayed",
       "restart-turns-settled",
       "open-turn-ledger-pruned",
+      "provider-commands-started",
       "automation-scheduler-started",
       "provider-runtime-reconciler-started",
     ]);

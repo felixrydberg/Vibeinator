@@ -16,7 +16,8 @@ import type { OrchestrationThreadActivity } from "@synara/contracts";
 
 import type { Thread } from "../types";
 
-export type QueuedComposerPauseReason = "stopped" | "error" | "usage-limit";
+export const QUEUED_COMPOSER_RESTART_PAUSE = "application-restart";
+export type QueuedComposerPauseReason = "stopped" | "error" | "usage-limit" | "restart";
 
 export interface QueuedComposerPause {
   readonly reason: QueuedComposerPauseReason;
@@ -72,16 +73,19 @@ export function deriveQueuedComposerPause(input: {
     return { reason: "usage-limit", turnId: input.usageLimitRecovery.turnId };
   }
   // A live turn already holds the queue; the notice appears once it settles.
-  if (input.queuedTurnCount === 0 || !latestTurn || latestTurn.state === "running") {
+  if (input.queuedTurnCount === 0 || latestTurn?.state === "running") {
     return null;
   }
+  if (input.stoppedTurnId) {
+    return {
+      reason: input.stoppedTurnId === QUEUED_COMPOSER_RESTART_PAUSE ? "restart" : "stopped",
+      turnId: latestTurn?.turnId ?? input.stoppedTurnId,
+    };
+  }
+  if (!latestTurn) return null;
   const acknowledged = input.resumedTurnId === latestTurn.turnId;
   if (!acknowledged && turnHitUsageLimit(latestTurn, input.activities, input.threadError)) {
     return { reason: "usage-limit", turnId: latestTurn.turnId };
-  }
-  // The stop holds even if the server then promotes a turn it had queued itself.
-  if (input.stoppedTurnId) {
-    return { reason: "stopped", turnId: latestTurn.turnId };
   }
   if (!acknowledged && latestTurn.state === "error") {
     return { reason: "error", turnId: latestTurn.turnId };

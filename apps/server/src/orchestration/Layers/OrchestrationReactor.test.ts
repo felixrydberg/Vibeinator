@@ -55,6 +55,9 @@ describe("OrchestrationReactor", () => {
         ),
         Layer.provideMerge(
           Layer.succeed(ProviderCommandReactor, {
+            pauseRestoredWork: Effect.sync(() => {
+              started.push("restored-work-paused");
+            }),
             start: Effect.acquireRelease(
               Effect.sync(() => {
                 started.push("provider-command-reactor");
@@ -109,6 +112,7 @@ describe("OrchestrationReactor", () => {
     const scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reactor.start.pipe(Scope.provide(scope)));
     await Effect.runPromise(reactor.reconcileSettledOpenTurns);
+    await Effect.runPromise(reactor.startProviderCommands.pipe(Scope.provide(scope)));
 
     expect(started).toEqual([
       "studio-output-reactor",
@@ -116,6 +120,7 @@ describe("OrchestrationReactor", () => {
       "thread-git-metadata-reactor",
       "provider-runtime-ingestion",
       "sidechat-expiry-reactor",
+      "restored-work-paused",
       "provider-command-reactor",
     ]);
     expect(reconciledOpenTurns).toBe(1);

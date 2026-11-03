@@ -40,14 +40,7 @@ import { ProjectionPendingInteractionRepository } from "./persistence/Services/P
 import { ThreadDeletionReactor } from "./orchestration/Services/ThreadDeletionReactor";
 import { ThreadSnoozeReactor } from "./orchestration/Services/ThreadSnoozeReactor";
 import { UsageLimitRecoveryReactor } from "./orchestration/Services/UsageLimitRecoveryReactor";
-import {
-  claimQuitResumeRecordAtStartup,
-  captureCrashResumeRecord,
-  persistCrashResumeRecord,
-  type QuitResumeRecordRead,
-  readQuitResumeRecord,
-  resumeQuitInterruptedChats,
-} from "./orchestration/quitResume";
+import { claimQuitResumeRecordAtStartup } from "./orchestration/quitResume";
 import { reconcileRestartStuckTurns } from "./orchestration/startupTurnReconciliation";
 import { ProviderSessionReaper } from "./provider/Services/ProviderSessionReaper";
 import { ProviderRuntimeReconciler } from "./provider/Services/ProviderRuntimeReconciler";
@@ -137,11 +130,12 @@ export function closeServerRuntimePipeline(input: {
 /**
  * Starts the subscriber pipeline in the order restart recovery depends on.
  *
- * The orchestration reactor starts first: runtime ingestion replays the
+ * Runtime observers start first: ingestion replays the
  * provider events the previous process journaled but never ingested, so a turn
  * whose terminal event reached the journal completes normally instead of being
- * reported as interrupted. Restart reconciliation then settles the turns whose
- * runtimes died with that process. The remaining reactors start last, because
+ * reported as interrupted. Restart reconciliation then settles orphaned turns,
+ * pauses goals and clears usage-limit waits before provider commands start.
+ * The remaining reactors start last, because
  * their first pass reads thread state (a heartbeat automation skips a target
  * thread with an active turn, the runtime reconciler settles stale running
  * turns) and a restart-orphaned turn still reads as running until
@@ -150,7 +144,7 @@ export function closeServerRuntimePipeline(input: {
 export function startServerRuntimePipeline<R>(input: {
   readonly orchestrationReactor: Pick<
     OrchestrationReactorShape,
-    "start" | "reconcileSettledOpenTurns"
+    "start" | "startProviderCommands" | "reconcileSettledOpenTurns"
   >;
   readonly reconcileRestartStuckTurns: Effect.Effect<void, never, R>;
   readonly reactors: ReadonlyArray<{
@@ -166,6 +160,10 @@ export function startServerRuntimePipeline<R>(input: {
     // process start cannot replay state-dependent commands against the terminal
     // projection.
     yield* input.orchestrationReactor.reconcileSettledOpenTurns;
+    yield* Scope.provide(
+      input.orchestrationReactor.startProviderCommands,
+      input.subscriptionsScope,
+    );
     for (const reactor of input.reactors) {
       yield* Scope.provide(reactor.start(), input.subscriptionsScope);
     }
@@ -272,28 +270,12 @@ export const createEffectServer = Effect.fn(function* (
       subscriptionsScope,
     }),
   );
-  const previousResumeRecord = yield* readQuitResumeRecord(config.quitResumeStatePath);
-  let inMemoryCrashResume: QuitResumeRecordRead = { kind: "absent" };
   yield* startServerRuntimePipeline({
     orchestrationReactor,
     // Heal turns orphaned by the previous process exit (their in-memory runtimes
     // died, so they can never complete on their own) before clients can observe
     // the stale "Working" state.
-    reconcileRestartStuckTurns: Effect.gen(function* () {
-      // Journal replay has finished; capture only work still orphaned now.
-      // An explicit quit record (including an invalid one) takes precedence.
-      if (previousResumeRecord.kind === "absent") {
-        const crashResumeRecord = yield* captureCrashResumeRecord;
-        if (crashResumeRecord.kind === "record") {
-          // Keep the captured intent if this startup dies during reconciliation.
-          inMemoryCrashResume = yield* persistCrashResumeRecord({
-            path: config.quitResumeStatePath,
-            record: crashResumeRecord.record,
-          });
-        }
-      }
-      yield* reconcileRestartStuckTurns;
-    }).pipe(
+    reconcileRestartStuckTurns: reconcileRestartStuckTurns.pipe(
       Effect.provide(ProjectionPendingInteractionRepositoryLive),
       Effect.provide(ProviderSessionRuntimeRepositoryLive),
     ),
@@ -318,14 +300,9 @@ export const createEffectServer = Effect.fn(function* (
   );
   // Consume only after reconciliation, before admitting commands. If startup
   // fails earlier, both explicit quit and crash records remain available.
-  const claimedResumeRecord = yield* claimQuitResumeRecordAtStartup;
-  // A disk claim wins. Only a failed write can supply this same-startup fallback.
-  const quitResumeRecord =
-    claimedResumeRecord.kind === "absent" ? inMemoryCrashResume : claimedResumeRecord;
+  // Consume legacy quit records without treating them as fresh permission to work.
+  yield* claimQuitResumeRecordAtStartup;
   yield* runtimeStartup.markCommandReady;
-  // The recorded chats get their continuation turn now that the orphaned turns
-  // above are settled. Forked so the (rare) dispatch work never delays readiness.
-  yield* resumeQuitInterruptedChats(quitResumeRecord).pipe(Effect.forkIn(subscriptionsScope));
 
   yield* lifecycleEvents.publish({
     type: "welcome",

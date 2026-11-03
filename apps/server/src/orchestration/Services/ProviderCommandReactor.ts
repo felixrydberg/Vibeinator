@@ -40,6 +40,9 @@ export interface ProviderCommandReactorShape {
    */
   readonly start: Effect.Effect<void, never, Scope.Scope>;
 
+  /** Fence pre-boot work before starting dispatch in a new server process. */
+  readonly pauseRestoredWork: Effect.Effect<void>;
+
   /**
    * Resolves when the internal processing queue is empty and idle.
    * Intended for test use to replace timing-sensitive sleeps.

@@ -21,6 +21,9 @@ export interface OrchestrationReactorShape {
    */
   readonly start: Effect.Effect<void, never, Scope.Scope>;
 
+  /** Start provider commands only after durable restart reconciliation. */
+  readonly startProviderCommands: Effect.Effect<void, never, Scope.Scope>;
+
   /** Reconciles durable provider replay state after restart turn recovery. */
   readonly reconcileSettledOpenTurns: Effect.Effect<void>;
 }

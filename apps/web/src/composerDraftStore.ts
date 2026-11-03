@@ -14,6 +14,7 @@ import { persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 
 import { createComposerDraftStoreState } from "./composerDraftActions";
+import { QUEUED_COMPOSER_RESTART_PAUSE } from "./lib/queuedComposerPause";
 import {
   COMPOSER_DRAFT_STORAGE_KEY,
   COMPOSER_DRAFT_STORAGE_VERSION,
@@ -109,7 +110,15 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
         const draftsByThreadId = Object.fromEntries(
           Object.entries(normalizedPersisted.draftsByThreadId).map(([threadId, draft]) => [
             threadId,
-            toHydratedThreadDraft(threadId as ThreadId, draft),
+            {
+              ...toHydratedThreadDraft(threadId as ThreadId, draft),
+              ...(draft.queuedTurns?.length
+                ? {
+                    queueStoppedTurnId: draft.queueStoppedTurnId || QUEUED_COMPOSER_RESTART_PAUSE,
+                    queueResumedTurnId: null,
+                  }
+                : {}),
+            },
           ]),
         );
         return {

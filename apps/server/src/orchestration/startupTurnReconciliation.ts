@@ -81,7 +81,11 @@ type AssistantMessageCompleteCommand = Extract<
 type RestartReconciliationCommand =
   | ThreadSessionSetCommand
   | ThreadActivityAppendCommand
-  | AssistantMessageCompleteCommand;
+  | AssistantMessageCompleteCommand
+  | Extract<
+      OrchestrationCommand,
+      { readonly type: "thread.meta.update" | "thread.usage-limit.cancel" }
+    >;
 
 /** The durable interaction fields the planner needs; a full row is fine. */
 export type ReconcilablePendingInteraction = Pick<
@@ -96,6 +100,9 @@ export interface ReconcilableThread {
   readonly modelSelection?: ModelSelection;
   readonly session: OrchestrationSession | null;
   readonly latestTurn: { readonly state: "running" | "interrupted" | "completed" | "error" } | null;
+  readonly goal?: string | null | undefined;
+  readonly goalPausedAt?: string | null | undefined;
+  readonly usageLimitRecovery?: { readonly id: string } | null | undefined;
   readonly activities?: ReadonlyArray<
     Pick<OrchestrationThreadActivity, "createdAt" | "id" | "kind" | "payload" | "sequence"> &
       Partial<Pick<OrchestrationThreadActivity, "turnId" | "sequenceSource">>
@@ -474,6 +481,23 @@ export function planRestartTurnReconciliation(input: {
   const commands: RestartReconciliationCommand[] = [];
   for (const thread of input.threads) {
     const hasInFlightTurn = threadHasInFlightTurn(thread);
+    if (thread.goal?.trim() && thread.goalPausedAt == null) {
+      commands.push({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe(`restart-pause-goal:${thread.id}:${input.now}`),
+        threadId: thread.id,
+        goalPaused: true,
+      });
+    }
+    if (thread.usageLimitRecovery != null) {
+      commands.push({
+        type: "thread.usage-limit.cancel",
+        commandId: CommandId.makeUnsafe(`restart-cancel-usage-limit:${thread.id}:${input.now}`),
+        threadId: thread.id,
+        recoveryId: thread.usageLimitRecovery.id,
+        createdAt: input.now,
+      });
+    }
     commands.push(
       ...planStalePendingRequestCommands({
         thread,
@@ -549,8 +573,8 @@ export function planRestartTurnReconciliation(input: {
  * Reads the engine's in-memory command read model (post-bootstrap projection
  * state, kept current as commands commit), hydrates only stuck thread details to
  * discover stale human requests, and dispatches the resulting cleanup commands.
- * Every failure mode is contained and logged: a failed thread-detail read or a
- * failed individual dispatch must never block the server from coming up.
+ * Detail reads and ordinary turn cleanup are best-effort. Failure to persist a
+ * goal pause or cancel a restored usage-limit wait stops provider startup.
  *
  * Deliberately not a second `getCommandReadModel()` load. That query costs ~150ms
  * on a large database and this runs on the blocking startup path, after the
@@ -608,6 +632,8 @@ export const reconcileRestartStuckTurns: Effect.Effect<
   const threadsNeedingRestartCleanup = readModel.threads.filter(
     (thread) =>
       needsRestartReconciliation(thread) ||
+      (Boolean(thread.goal?.trim()) && thread.goalPausedAt == null) ||
+      thread.usageLimitRecovery != null ||
       threadHasCheckpointRevertInProgress(thread) ||
       thread.hasPendingApprovals ||
       thread.hasPendingUserInput ||
@@ -661,10 +687,12 @@ export const reconcileRestartStuckTurns: Effect.Effect<
     (command) =>
       engine.dispatch(command).pipe(
         Effect.catchCause((cause) =>
-          Effect.logWarning("failed to reconcile restart-stuck turn", {
-            threadId: command.threadId,
-            cause,
-          }),
+          command.type === "thread.meta.update" || command.type === "thread.usage-limit.cancel"
+            ? Effect.failCause(cause).pipe(Effect.orDie)
+            : Effect.logWarning("failed to reconcile restart-stuck turn", {
+                threadId: command.threadId,
+                cause,
+              }),
         ),
       ),
     { discard: true },

@@ -29,11 +29,13 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     // begin. Reverse-order finalization then drains provider commands first,
     // side-chat expiry second, runtime ingestion third, Git metadata fourth,
     // checkpoints fifth, and Hub output last.
-    yield* providerCommandReactor.start;
   });
 
   return {
     start,
+    startProviderCommands: providerCommandReactor.pauseRestoredWork.pipe(
+      Effect.andThen(providerCommandReactor.start),
+    ),
     reconcileSettledOpenTurns: providerRuntimeIngestion.reconcileSettledOpenTurns,
   } satisfies OrchestrationReactorShape;
 });

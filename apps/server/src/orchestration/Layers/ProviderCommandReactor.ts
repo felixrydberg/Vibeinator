@@ -1067,6 +1067,8 @@ const make = Effect.gen(function* () {
   // call time would see that fiber's (possibly empty) environment instead.
   const projectAgentRepository = yield* Effect.serviceOption(ProjectAgentRepository);
   const acceptedCompletionContexts = new Set<number>();
+  let restartSequence: number | undefined;
+  const restoredQueuedThreads = new Set<string>();
   const textGeneration = yield* TextGeneration;
   const serverSettings = yield* ServerSettingsService;
 
@@ -6090,6 +6092,7 @@ const make = Effect.gen(function* () {
 
   // Promote the next queued message only after the active provider turn settles.
   const drainQueuedTurnsForThread = Effect.fnUntraced(function* (threadId: ThreadId) {
+    if (restoredQueuedThreads.has(threadId)) return;
     const sessionThreadId = (yield* resolveProviderSessionThread(threadId))?.id ?? threadId;
     const sessionOwner = yield* resolveThreadShell(sessionThreadId);
     if (
@@ -6205,6 +6208,7 @@ const make = Effect.gen(function* () {
     const sessionThreadId = (yield* resolveProviderSessionThread(threadId))?.id ?? threadId;
     const queuedThreadIds = new Set<ThreadId>([threadId]);
     for (const queuedThreadId of yield* queuedTurnPromotions.listPendingThreadIds) {
+      if (restoredQueuedThreads.has(queuedThreadId)) continue;
       const queuedThread = ThreadId.makeUnsafe(queuedThreadId);
       const providerThread = yield* resolveProviderSessionThread(queuedThread);
       const queuedSessionThreadId = providerThread?.id ?? queuedThread;
@@ -6223,6 +6227,7 @@ const make = Effect.gen(function* () {
       return true;
     }
     for (const queuedThreadId of yield* queuedTurnPromotions.listPendingThreadIds) {
+      if (restoredQueuedThreads.has(queuedThreadId)) continue;
       const queuedThread = ThreadId.makeUnsafe(queuedThreadId);
       const providerThread = yield* resolveProviderSessionThread(queuedThread);
       if ((providerThread?.id ?? queuedThread) === sessionThreadId) {
@@ -8771,6 +8776,7 @@ const make = Effect.gen(function* () {
     event: Extract<ProviderIntentEvent, { type: "thread.turn-queued" }>,
   ) =>
     Effect.gen(function* () {
+      if (restartSequence !== undefined && event.sequence <= restartSequence) return;
       const delivery = yield* deliveryRepository.getDelivery({
         consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
         eventSequence: event.sequence,
@@ -9781,8 +9787,93 @@ const make = Effect.gen(function* () {
       }
     });
 
+    const pauseRestoredIntent = Effect.fnUntraced(function* (event: OrchestrationEvent) {
+      if (
+        restartSequence !== undefined &&
+        event.sequence <= restartSequence &&
+        event.type === "thread.turn-queued"
+      ) {
+        // Preserve the durable prompt, but do not promote it until fresh user input.
+        restoredQueuedThreads.add(event.payload.threadId);
+        return false;
+      }
+      if (
+        restartSequence === undefined ||
+        event.sequence > restartSequence ||
+        !isProviderIntentEvent(event) ||
+        isQuarantineExemptProviderIntent(event) ||
+        (!isProviderSideEffectIntent(event) && event.type !== "thread.turn-queued")
+      )
+        return false;
+      const key = {
+        consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
+        eventSequence: event.sequence,
+      };
+      const existing = yield* deliveryRepository.getDelivery(key);
+      // Keep uncertain execution and lease ownership under the existing recovery rules.
+      if (
+        Option.isSome(existing) &&
+        existing.value.state !== "retry" &&
+        existing.value.state !== "succeeded"
+      )
+        return false;
+      if (Option.isSome(existing) && existing.value.state === "retry") {
+        const now = new Date().toISOString();
+        const claimOwner = `${processOwner}:restart:${event.sequence}`;
+        const claim = yield* deliveryRepository.claim({
+          ...key,
+          threadId: event.payload.threadId,
+          claimOwner,
+          claimedAt: now,
+          claimExpiresAt: now,
+        });
+        if (Option.isNone(claim))
+          return yield* Effect.die(new Error("Could not fence restored provider delivery"));
+        const stopped = yield* deliveryRepository.markTerminalFailure({
+          ...key,
+          expectedClaimOwner: claimOwner,
+          state: "dead",
+          error: "Paused after application restart before retrying provider work.",
+          updatedAt: now,
+        });
+        if (!stopped)
+          return yield* Effect.die(new Error("Restored provider delivery lost its claim"));
+        yield* deliveryRepository
+          .reconcile({
+            ...key,
+            threadId: event.payload.threadId,
+            reconciliationId: crypto.randomUUID(),
+            expectedState: "dead",
+            outcome: "abandon",
+            reconciledBy: "restart-pause-policy",
+            note: "Requires new user input or explicit resume.",
+            reconciledAt: now,
+          })
+          .pipe(
+            Effect.flatMap((result) =>
+              Option.isSome(result)
+                ? Effect.void
+                : Effect.die(new Error("Could not settle paused provider delivery")),
+            ),
+          );
+      }
+      yield* recordQuarantinedProcessed(event);
+      yield* requireCursorAdvance(event);
+      return true;
+    });
+
     const processOrderedEvent = Effect.fnUntraced(function* (event: OrchestrationEvent) {
       if (event.sequence <= cursor) return;
+      if (
+        restartSequence !== undefined &&
+        event.sequence > restartSequence &&
+        (event.type === "thread.turn-start-requested" ||
+          event.type === "thread.turn-queued" ||
+          event.type === "thread.goal-continuation-requested")
+      ) {
+        restoredQueuedThreads.delete(event.payload.threadId);
+      }
+      if (yield* pauseRestoredIntent(event)) return;
       if (
         isProviderIntentEvent(event) &&
         !isClaimedProviderIntent(event) &&
@@ -10348,6 +10439,7 @@ const make = Effect.gen(function* () {
       (delivery) =>
         Effect.gen(function* () {
           const event = yield* readProviderIntentEvent(delivery.eventSequence);
+          if (yield* pauseRestoredIntent(event)) return;
           if (yield* skipUnavailableProviderOwner(event)) return;
           return yield* withDeliveryOwnerLock(
             delivery.threadId,
@@ -10683,6 +10775,16 @@ const make = Effect.gen(function* () {
         continue;
       const review =
         thread.claudeCacheReview ?? (yield* readBlockedClaudeCompactionAttempt(thread.id));
+      if (restartSequence !== undefined && review != null) {
+        if (review.status === "responding" || review.status === "compacting") {
+          yield* setClaudeCacheReview(
+            thread.id,
+            { ...review, status: "failed", error: LOST_CLAUDE_COMPACTION_ERROR },
+            review.reviewId,
+          );
+        }
+        continue;
+      }
       if (
         !review?.compactionTurnId ||
         (review.status !== "compacting" &&
@@ -10800,6 +10902,13 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const pauseRestoredWork = Effect.gen(function* () {
+    restartSequence = yield* orchestrationEngine.getEventHighWaterSequence;
+    for (const threadId of yield* queuedTurnPromotions.listPendingThreadIds) {
+      restoredQueuedThreads.add(threadId);
+    }
+  }).pipe(Effect.orDie);
+
   const start = seedThreadModelSelections.pipe(
     Effect.andThen(
       Effect.all([
@@ -10814,8 +10923,16 @@ const make = Effect.gen(function* () {
               ),
             ),
           ),
-          Effect.andThen(recoverQueuedTurnPromotions),
-          Effect.andThen(recoverActiveThreadGoals),
+          Effect.andThen(
+            Effect.suspend(() =>
+              restartSequence === undefined ? recoverQueuedTurnPromotions : Effect.void,
+            ),
+          ),
+          Effect.andThen(
+            Effect.suspend(() =>
+              restartSequence === undefined ? recoverActiveThreadGoals : Effect.void,
+            ),
+          ),
         ),
         Stream.runForEach(providerService.streamEvents, (event) => {
           if (event.type !== "turn.completed" && event.type !== "turn.aborted") {
@@ -10965,6 +11082,7 @@ const make = Effect.gen(function* () {
 
   return {
     start,
+    pauseRestoredWork,
     drain,
     listBlockingDeliveries,
     reconcileDelivery,
