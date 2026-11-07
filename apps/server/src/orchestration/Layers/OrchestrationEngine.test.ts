@@ -8,6 +8,7 @@ import {
   THREAD_GOAL_INLINE_MAX_CHARS,
   THREAD_GOAL_MAX_CHARS,
   ThreadId,
+  RuntimeSessionId,
   TurnId,
   type OrchestrationCommand,
   type OrchestrationEvent,
@@ -46,6 +47,13 @@ import { ServerConfig } from "../../config.ts";
 import { ORCHESTRATION_EVENT_PUBSUB_CAPACITY } from "../orchestrationAdmission.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  NativeArchiveRepository,
+  NativeNormalizationOrigin,
+} from "../../persistence/Services/NativeArchive.ts";
+import { NativeArchiveRepositoryLive } from "../../persistence/Layers/NativeArchive.ts";
+import { ProjectionThreadMessageRepository } from "../../persistence/Services/ProjectionThreadMessages.ts";
+import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
 
 const OrchestrationProjectionSnapshotQueryLive = OrchestrationProjectionSnapshotQueryBase.pipe(
   Layer.provide(ServerSettingsService.layerTest()),
@@ -221,6 +229,152 @@ function now() {
 }
 
 describe("OrchestrationEngine", () => {
+  it("atomically links native sources to domain events, rejects unrelated targets and replays without duplicating text", async () => {
+    const system = await createOrchestrationSystem();
+    const projectId = asProjectId("native-projection-project");
+    const threadId = ThreadId.makeUnsafe("native-projection-root");
+    const childId = ThreadId.makeUnsafe("native-projection-child");
+    const siblingId = ThreadId.makeUnsafe("native-projection-sibling");
+    const createdAt = now();
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.makeUnsafe("native-project"),
+          projectId,
+          title: "Synthetic",
+          workspaceRoot: "/synthetic",
+          defaultModelSelection: null,
+          createdAt,
+        }),
+      );
+      for (const id of [threadId, childId, siblingId])
+        await system.run(
+          system.engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.makeUnsafe(`create-${id}`),
+            threadId: id,
+            projectId,
+            title: "Synthetic",
+            modelSelection: { provider: "codex", model: "gpt-5-codex" },
+            interactionMode: "default",
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+          }),
+        );
+      await system.run(
+        system.sql`UPDATE projection_threads SET parent_thread_id = ${threadId} WHERE thread_id = ${childId}`,
+      );
+      const source = await system.run(
+        Effect.gen(function* () {
+          const archive = yield* NativeArchiveRepository;
+          return yield* archive.appendCapture({
+            schemaVersion: 1,
+            identity: {
+              projectId,
+              threadId,
+              ingressOrdinal: 1,
+              session: {
+                provider: "codex",
+                providerInstanceId: "codex",
+                runtimeSessionId: RuntimeSessionId.makeUnsafe("native-runtime"),
+                lifecycleGeneration: "native-generation",
+              },
+            },
+            nativeSessionId: null,
+            nativeEventId: null,
+            nativeItemId: null,
+            nativeTurnId: null,
+            payloadType: "message",
+            direction: "incoming",
+            observedAt: createdAt,
+            capturePolicyVersion: 1,
+            disposition: "retained",
+            content: { encoding: "utf8-json", text: '{"text":"native source"}' },
+          });
+        }).pipe(
+          Effect.provide(NativeArchiveRepositoryLive),
+          Effect.provideService(SqlClient.SqlClient, system.sql),
+        ),
+      );
+      const delta = (id: ThreadId, suffix: string): OrchestrationCommand => ({
+        type: "thread.message.assistant.delta",
+        commandId: CommandId.makeUnsafe(`native-delta-${suffix}`),
+        threadId: id,
+        messageId: asMessageId(`native-message-${id}`),
+        delta: "🙂\0日本語\r\nEND_SENTINEL",
+        createdAt,
+      });
+      const dispatch = (command: OrchestrationCommand) =>
+        system.run(
+          system.engine.dispatch(command).pipe(
+            Effect.provideService(NativeNormalizationOrigin, {
+              captureIds: [source.captureId],
+              ownerThreadId: threadId,
+            }),
+          ),
+        );
+      const root = delta(threadId, "root");
+      const receipt = await dispatch(root);
+      expect(await dispatch(root)).toEqual(receipt);
+      await dispatch(delta(childId, "child"));
+      await expect(dispatch(delta(siblingId, "sibling"))).rejects.toThrow(
+        "Native capture could not be linked",
+      );
+      await system.run(system.sql`CREATE TRIGGER fail_native_link BEFORE INSERT ON native_normalization_links
+        BEGIN SELECT RAISE(ABORT, 'synthetic link failure'); END`);
+      await expect(dispatch(delta(threadId, "rollback"))).rejects.toThrow();
+      await system.run(system.sql`DROP TRIGGER fail_native_link`);
+      const events = Array.from(await system.run(Stream.runCollect(system.engine.readEvents(0))));
+      const sourced = events.filter((event) =>
+        event.metadata.nativeCaptureIds?.includes(source.captureId),
+      );
+      expect(sourced).toHaveLength(2);
+      expect(sourced.map((event) => event.aggregateId)).toEqual([threadId, childId]);
+      const links = await system.run(
+        system.sql`SELECT event_id, thread_id FROM native_normalization_links ORDER BY event_sequence`,
+      );
+      expect(links).toEqual(
+        sourced.map((event) => ({ event_id: event.eventId, thread_id: event.aggregateId })),
+      );
+      const readText = () =>
+        system.run(
+          Effect.gen(function* () {
+            const messages = yield* ProjectionThreadMessageRepository;
+            return yield* Effect.forEach([childId, threadId], (id) =>
+              messages.listByThreadId({ threadId: id }).pipe(
+                Effect.map((rows) => ({
+                  thread_id: id,
+                  text: rows.map((row) => row.text).join(""),
+                })),
+              ),
+            );
+          }).pipe(
+            Effect.provide(ProjectionThreadMessageRepositoryLive),
+            Effect.provideService(SqlClient.SqlClient, system.sql),
+          ),
+        );
+      const textBefore = await readText();
+      expect(textBefore).toEqual(
+        [childId, threadId].map((id) => ({ thread_id: id, text: "🙂\0日本語\r\nEND_SENTINEL" })),
+      );
+      // Rebuilding the transcript from domain events never reads or embeds raw payloads.
+      await system.run(system.sql`DELETE FROM projection_thread_messages`);
+      await system.run(system.sql`DELETE FROM message_text_chunks`);
+      await system.run(system.sql`DELETE FROM message_text_segments`);
+      for (const event of events) await system.run(system.projectionPipeline.projectEvent(event));
+      expect(await readText()).toEqual(textBefore);
+      await dispatch(delta(threadId, "rollback"));
+      expect(
+        await system.run(system.sql`SELECT COUNT(*) AS count FROM native_normalization_links`),
+      ).toEqual([{ count: 3 }]);
+    } finally {
+      await system.dispose();
+    }
+  });
+
   it("commits the metadata snapshot cursor before publishing its accepted event", async () => {
     const system = await createOrchestrationSystem();
     const commandId = CommandId.makeUnsafe("metadata-phase-commit");

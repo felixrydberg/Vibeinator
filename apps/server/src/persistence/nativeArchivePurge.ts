@@ -7,6 +7,7 @@ export const purgeThreadNativeArchive = (sql: SqlClient.SqlClient, threadId: str
     yield* sql`DELETE FROM native_normalization_links WHERE thread_id = ${threadId}`;
     yield* sql`DELETE FROM durable_legacy_sources WHERE thread_id = ${threadId}`;
     yield* sql`DELETE FROM durable_capture_coverage WHERE thread_id = ${threadId}`;
+    yield* sql`DELETE FROM native_recording_sessions WHERE thread_id = ${threadId}`;
     yield* sql`DELETE FROM durable_attachment_references WHERE thread_id = ${threadId}`;
     yield* sql`DELETE FROM native_captures WHERE thread_id = ${threadId}`;
     yield* sql`DELETE FROM durable_payloads WHERE thread_id = ${threadId}`;

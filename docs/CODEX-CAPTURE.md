@@ -8,7 +8,7 @@ Each owned coding-session JSON-RPC envelope is committed before notification/req
 
 Capture covers requests, notifications, responses, unknown protocol methods, tool results and outgoing approval/input decisions. Non-JSON launcher noise and malformed transport frames retain existing handling and are not claimed as complete captures. Discovery-only processes have no app conversation owner and are not archived.
 
-Identity includes the app thread/project, provider instance, a new runtime UUID per process attempt, lifecycle generation and per-attempt ingress ordinal. Native request IDs preserve their JSON type (`71` and `"71"` differ); native thread/turn/item IDs remain metadata and the full original envelope remains authoritative. Repeated native IDs and identical content in a later attempt remain distinct evidence. Notifications/requests carry `nativeCaptureId` into derived runtime events, including their compacted diagnostic copies. Durable normalization-link rows and shared replay/coverage integration belong to VIB-007.
+Identity includes the app thread/project, provider instance, a new runtime UUID per process attempt, lifecycle generation and per-attempt ingress ordinal. Native request IDs preserve their JSON type (`71` and `"71"` differ); native thread/turn/item IDs remain metadata and the full original envelope remains authoritative. Repeated native IDs and identical content in a later attempt remain distinct evidence. Notifications/requests carry `nativeCaptureId` into derived runtime events, including their compacted diagnostic copies. VIB-007 adds [durable normalization links and failure/replay integration](CAPTURE-REPLAY.md).
 
 ## Backpressure and lifecycle
 
@@ -30,7 +30,7 @@ This is a protocol-field policy, not arbitrary secret detection inside user/tool
 
 Nine focused regression cases use the real manager, adapter compaction and SQLite repository, with a synthetic child transport. They cover multi-megabyte Unicode/NUL output, exact incoming JSON, unknown methods, typed approval IDs and accept/deny/cancel replies, reconnect/stale requests, credential exclusions and benign auth/quota status, blocked SQLite backpressure and EOF, archive write failure/recovery, stop during pending capture, queue overflow, storage timeout during shutdown and partial stdout during a backpressured stdin write. The large-payload regression also fails against `main`'s manager because the archive record is missing, then passes with the capture hook. The partial-stdout test fails with the outgoing resume omitted, then passes with the drain ordering fixed.
 
-These tests do not launch or authenticate a live Codex process. Live provider startup/approval qualification, external process-tree termination and signed packaged behavior remain separate qualification work. Shared durable projection/replay guarantees remain VIB-007; Claude's native path remains VIB-006.
+These tests do not launch or authenticate a live Codex process. Live provider startup/approval qualification, external process-tree termination and signed packaged behavior remain separate qualification work. See [shared failure/replay guarantees](CAPTURE-REPLAY.md) and [Claude capture](CLAUDE-CAPTURE.md) for their implementations and limits.
 
 ## VIB-005 verification (7 November 2026)
 

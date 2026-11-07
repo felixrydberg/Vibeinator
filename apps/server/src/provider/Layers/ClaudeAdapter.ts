@@ -204,6 +204,7 @@ import { extractProposedPlanMarkdown, withProviderPlanModePrompt } from "../plan
 import { ClaudeAdapter, type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { NativeCaptureOrigin } from "../nativeCapture.ts";
+import { NativeCaptureState } from "../nativeCaptureState.ts";
 import {
   claudePublishedPayload,
   type ClaudeCaptureFrame,
@@ -2429,6 +2430,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
     const adapterScope = yield* Effect.scope;
     const fileSystem = yield* FileSystem.FileSystem;
     const serverConfig = yield* ServerConfig;
+    const captureState = Option.getOrUndefined(yield* Effect.serviceOption(NativeCaptureState));
     // Optional so adapter tests can run without the gateway layer; when
     // present, every session gets the synara_* MCP tools.
     const agentGatewayCredentials = Option.getOrUndefined(
@@ -6626,6 +6628,26 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
     ): Effect.Effect<void, ProviderAdapterProcessError> =>
       Effect.gen(function* () {
         context.stopped = true;
+        let emergencyTeardown: Fiber.Fiber<void, ProviderAdapterProcessError> | undefined;
+        if (
+          context.nativeCaptureFailure ||
+          (captureState &&
+            !captureState.canRecord(
+              context.session.threadId,
+              context.lifecycleGeneration ?? context.cacheProcessId,
+            ))
+        ) {
+          // Storage backpressure must not hold physical retirement behind event publication.
+          try {
+            context.query.close();
+          } catch {
+            /* The owned process still requires teardown proof. */
+          }
+          emergencyTeardown = yield* teardownClaudeProcess(
+            context.session.threadId,
+            context.processOwner,
+          ).pipe(Effect.forkIn(adapterScope));
+        }
         yield* Deferred.succeed(context.stoppedSignal, undefined);
         yield* cancelAgentGatewayTurn(context.gatewaySessionLease, context.turnState?.turnId);
         context.gatewaySessionLease?.release();
@@ -6695,15 +6717,16 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
 
         // @effect-diagnostics-next-line tryCatchInEffectGen:off
         try {
-          context.query.close();
+          if (!emergencyTeardown) context.query.close();
         } catch (cause) {
           yield* emitRuntimeError(context, "Failed to close Claude runtime query.", cause);
         }
         // Do not release session ownership until teardown proves the old
         // process tree exited. The stopped context remains non-routable and
         // prevents a replacement process from being spawned concurrently.
-        yield* teardownClaudeProcess(context.session.threadId, context.processOwner);
-        if (context.nativeCapture) yield* Effect.promise(() => context.nativeCapture!.drain());
+        if (emergencyTeardown) yield* Fiber.join(emergencyTeardown);
+        else yield* teardownClaudeProcess(context.session.threadId, context.processOwner);
+        if (context.nativeCapture) yield* Effect.promise(() => context.nativeCapture!.close());
 
         // Retired background tasks cannot report their own SDK notification.
         // Publish terminal evidence only after the owned process has exited so

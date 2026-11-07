@@ -4,6 +4,7 @@ import type {
   DurablePayloadChunk,
   DurablePayloadDescriptor,
   NativeCapture,
+  NativeCaptureId,
   NativeNormalizationLink,
   ProjectId,
   ThreadId,
@@ -36,6 +37,15 @@ export interface ArchiveContent {
   /** Already serialized JSON or exact well-formed text. Serialization happens once at ingress. */
   readonly text: string;
 }
+
+/** Trusted ingestion context, carried separately from user-authored commands. */
+export class NativeNormalizationOrigin extends ServiceMap.Service<
+  NativeNormalizationOrigin,
+  {
+    readonly captureIds: ReadonlyArray<NativeCaptureId>;
+    readonly ownerThreadId: ThreadId;
+  }
+>()("vibeinator/NativeNormalizationOrigin") {}
 type CaptureMetadata = Omit<
   NativeCapture,
   "captureId" | "captureSequence" | "committedAt" | "payload" | "reason" | "disposition"

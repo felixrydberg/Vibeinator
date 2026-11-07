@@ -2,7 +2,7 @@
 
 A desktop app for working with Codex and Claude while preserving project context across sessions and provider switches.
 
-Status: the desktop baseline, SQLite archive storage and Codex/Claude native capture are implemented. Conversations restore paused after restart; shared replay guarantees and handoff changes remain planned.
+Status: the desktop baseline, SQLite archive storage, Codex/Claude native capture and [capture failure/replay guarantees](docs/CAPTURE-REPLAY.md) are implemented. Conversations restore paused after restart; history retrieval, summaries and handoff changes remain planned.
 
 The [Synara audit](docs/SYNARA-AUDIT.md) maps the existing implementation and confirmed gaps. The [implementation draft](docs/IMPLEMENTATION-DRAFT.md) defines issues, dependencies, acceptance criteria, and milestone order. The [tracker](docs/IMPLEMENTATION-TRACKER.md) links twenty GitHub issues and records delivery state. The [adoption report](docs/BASELINE-ADOPTION.md) records passing checks and remaining qualification. [UPSTREAM.md](UPSTREAM.md) records the source revision and retained notices.
 

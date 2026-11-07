@@ -78,6 +78,7 @@ import { PullRequestAutoFixServiceLive } from "./pullRequestAutoFix/Layers/PullR
 import { GitHubInboxServiceLive } from "./githubInbox/Layers/GitHubInboxService";
 import { ProviderHealthLive } from "./provider/Layers/ProviderHealth";
 import { makeServerProviderLayer } from "./provider/runtimeLayer";
+import { NativeCaptureStateLive } from "./provider/nativeCaptureState";
 
 export { makeServerProviderLayer } from "./provider/runtimeLayer";
 
@@ -365,16 +366,18 @@ export function makeServerRuntimeServicesLayer(
  * same tokens, so constructing them independently would break scoped MCP.
  */
 export function makeServerApplicationLayers() {
+  const nativeCaptureStateLayer = NativeCaptureStateLive;
   const agentGatewayCredentialsLayer = AgentGatewayCredentialsWithSecretsLive;
   const runtimeServicesLayer = makeServerRuntimeServicesLayer({
     agentGatewayCredentialsLayer,
-  });
+  }).pipe(Layer.provideMerge(nativeCaptureStateLayer));
   // Provider start/discovery gates must observe the same settings instance as
   // the RPC layer. Reusing this layer in the final graph lets Effect memoize a
   // single ServerSettings service instead of capturing private defaults.
-  const providerLayer = makeServerProviderLayer({ agentGatewayCredentialsLayer }).pipe(
-    Layer.provideMerge(ServerSettingsLive),
-  );
+  const providerLayer = makeServerProviderLayer({
+    agentGatewayCredentialsLayer,
+    nativeCaptureStateLayer,
+  }).pipe(Layer.provideMerge(ServerSettingsLive));
   return {
     runtimeServicesLayer,
     providerLayer,

@@ -154,6 +154,7 @@ import Migration0135 from "./Migrations/135_ProjectionMessageTurnActivityIndex.t
 // Slots 136–140 are already released in the Remote lineage; new common migrations follow them.
 import Migration0141 from "./Migrations/141_ProjectionThreadsUsageLimitRecovery.ts";
 import Migration0142 from "./Migrations/142_DurableNativeArchive.ts";
+import Migration0143 from "./Migrations/143_NativeRecordingSessions.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -307,6 +308,7 @@ export const migrationEntries = [
   [135, "ProjectionMessageTurnActivityIndex", Migration0135],
   [141, "ProjectionThreadsUsageLimitRecovery", Migration0141],
   [142, "DurableNativeArchive", Migration0142],
+  [143, "NativeRecordingSessions", Migration0143],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

@@ -415,13 +415,23 @@ export const makeNativeArchiveRepository = Effect.gen(function* () {
         Effect.gen(function* () {
           yield* requireOwner(input);
           const link = yield* validate(NativeNormalizationLink, input.link);
-          if (link.threadId !== input.threadId)
-            return yield* Effect.fail(failure("NativeArchive.link", "ownership"));
+          if (link.threadId !== input.threadId) {
+            const lineage = yield* sql`WITH RECURSIVE owners(thread_id, parent_thread_id) AS (
+              SELECT thread_id, parent_thread_id FROM projection_threads WHERE thread_id = ${link.threadId}
+                AND project_id = ${input.projectId} AND deleted_at IS NULL
+              UNION
+              SELECT thread.thread_id, thread.parent_thread_id FROM projection_threads AS thread
+                JOIN owners ON thread.thread_id = owners.parent_thread_id
+                WHERE thread.project_id = ${input.projectId} AND thread.deleted_at IS NULL
+            ) SELECT 1 FROM owners WHERE thread_id = ${input.threadId}`;
+            if (lineage.length === 0)
+              return yield* Effect.fail(failure("NativeArchive.link", "ownership"));
+          }
           const matches =
             yield* sql`SELECT 1 FROM native_captures AS capture JOIN orchestration_events AS event
       ON event.event_id = ${link.eventId} AND event.sequence = ${link.eventSequence}
       WHERE capture.capture_id = ${link.captureId} AND capture.project_id = ${input.projectId} AND capture.thread_id = ${input.threadId}
-        AND event.aggregate_kind = 'thread' AND event.stream_id = ${input.threadId}`;
+        AND event.aggregate_kind = 'thread' AND event.stream_id = ${link.threadId}`;
           if (matches.length === 0)
             return yield* Effect.fail(failure("NativeArchive.link", "ownership"));
           const existing = yield* sql<{

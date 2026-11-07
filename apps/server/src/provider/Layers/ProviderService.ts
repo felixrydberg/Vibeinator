@@ -92,6 +92,12 @@ import {
 } from "../Services/ProviderSessionDirectory.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { PersistenceDecodeError } from "../../persistence/Errors.ts";
+import { splitRuntimeTextForJournal } from "../providerRuntimeEventIngress.ts";
+import {
+  NativeCaptureState,
+  NATIVE_RECORDING_FAILURE_MESSAGE,
+  type NativeRecordingFailure,
+} from "../nativeCaptureState.ts";
 import {
   ProviderRuntimeEventRepository,
   type PersistedProviderRuntimeEvent,
@@ -975,6 +981,17 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
 
     const registry = yield* ProviderAdapterRegistry;
     const directory = yield* ProviderSessionDirectory;
+    const captureState = Option.getOrUndefined(yield* Effect.serviceOption(NativeCaptureState));
+    const assertRecordingReady = (threadId: ThreadId) =>
+      captureState
+        ? captureState
+            .assertReady(threadId)
+            .pipe(
+              Effect.mapError(() =>
+                toValidationError("ProviderService.recording", NATIVE_RECORDING_FAILURE_MESSAGE),
+              ),
+            )
+        : Effect.void;
     const serverSettings = yield* ServerSettingsService;
     const secretStore = yield* ServerSecretStore;
     const credentialsFingerprintKey = yield* secretStore.getOrCreateRandom(
@@ -1099,6 +1116,22 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           onLockTimeout,
         ),
     };
+    const stopAdapterSession = (
+      adapter: ProviderAdapterShape<ProviderAdapterError>,
+      threadId: ThreadId,
+    ) =>
+      Effect.suspend(() => {
+        const generation = lifecycle.currentGeneration(threadId);
+        return adapter
+          .stopSession(threadId)
+          .pipe(
+            Effect.tap(() =>
+              captureState && generation !== undefined
+                ? captureState.close(threadId, generation)
+                : Effect.void,
+            ),
+          );
+      });
     for (const binding of yield* directory.listBindings()) {
       if (binding.lifecycleGeneration !== undefined) {
         lifecycle.adoptCurrent(binding.threadId, binding.lifecycleGeneration);
@@ -1565,6 +1598,8 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
 
       return Effect.uninterruptible(
         persistence.pipe(
+          Effect.interruptible,
+          Effect.timeout("5 seconds"),
           Effect.tap(() =>
             canonicalEventLogger ? canonicalEventLogger.write(event, null) : Effect.void,
           ),
@@ -1975,12 +2010,16 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     ) =>
       runIdleSensitiveProviderWork(
         threadId,
-        Effect.suspend(() => {
-          const generation = beginTurnDispatch(threadId);
-          return dispatch(generation).pipe(
-            Effect.ensuring(finishTurnDispatch(threadId, generation).pipe(Effect.ignore)),
-          );
-        }),
+        assertRecordingReady(threadId).pipe(
+          Effect.andThen(
+            Effect.suspend(() => {
+              const generation = beginTurnDispatch(threadId);
+              return dispatch(generation).pipe(
+                Effect.ensuring(finishTurnDispatch(threadId, generation).pipe(Effect.ignore)),
+              );
+            }),
+          ),
+        ),
       );
 
     const updateSessionBindingFromRuntimeEvent = (
@@ -2206,7 +2245,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                       }
                     }).pipe(
                       Effect.andThen(updateSessionBindingFromRuntimeEvent(canonicalEvent)),
-                      Effect.andThen(publishRuntimeEvent(canonicalEvent, persisted)),
+                      Effect.andThen(
+                        publishRuntimeEvent(persisted?.event ?? canonicalEvent, persisted),
+                      ),
                       Effect.andThen(scheduleRetiredGatewaySessionRecovery(canonicalEvent)),
                     ),
                   ),
@@ -2432,7 +2473,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               );
               return adapter;
             }
-            yield* adapter.stopSession(threadId);
+            yield* stopAdapterSession(adapter, threadId);
           }),
         );
 
@@ -2541,7 +2582,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             }
 
             if (activeSession) {
-              yield* providerAdapter.stopSession(threadId).pipe(
+              yield* stopAdapterSession(providerAdapter, threadId).pipe(
                 Effect.catchCause((cause) =>
                   Effect.logWarning("provider.session.stop-stale-failed", {
                     threadId,
@@ -2715,7 +2756,28 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           if (flush === undefined) textBatchFlushers.delete(adapter.provider);
           else textBatchFlushers.set(adapter.provider, flush);
         },
-        processEvent: processRuntimeEvent,
+        processEvent: (event) =>
+          Effect.forEach(
+            options?.persistRuntimeEvent ? splitRuntimeTextForJournal(event) : [event],
+            processRuntimeEvent,
+            { discard: true },
+          ),
+        ...(captureState
+          ? {
+              failureDetail: NATIVE_RECORDING_FAILURE_MESSAGE,
+              onProcessingFailure: (event: ProviderRuntimeEvent) =>
+                captureState.fail({
+                  threadId: event.threadId,
+                  generation:
+                    event.lifecycleGeneration ??
+                    lifecycle.currentGeneration(event.threadId) ??
+                    "unscoped",
+                  provider: event.provider,
+                  instanceId: event.providerInstanceId ?? event.provider,
+                  reason: "journal",
+                }),
+            }
+          : {}),
         updateHealth: runtimeEventPumpHealth.update,
         isPermanentFailure: (cause) =>
           Option.match(Cause.findErrorOption(cause), {
@@ -2808,7 +2870,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               return;
             }
             inheritedRuntimeGenerations.delete(input.threadId);
-            yield* adapter.stopSession(input.threadId).pipe(
+            yield* stopAdapterSession(adapter, input.threadId).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("provider.session.stop-stale-failed", {
                   threadId: input.threadId,
@@ -3288,6 +3350,22 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 // retire whatever the adapter may have half-spawned, and fail
                 // with text the caller can surface as a session error.
                 startupLifecycle.transition("starting");
+                if (captureState)
+                  yield* captureState
+                    .prepare({
+                      threadId,
+                      provider: resolved.instance.driver,
+                      providerInstanceId: resolved.instance.instanceId,
+                      lifecycleGeneration: lease.generation,
+                    })
+                    .pipe(
+                      Effect.mapError(() =>
+                        toValidationError(
+                          "ProviderService.startSession",
+                          NATIVE_RECORDING_FAILURE_MESSAGE,
+                        ),
+                      ),
+                    );
                 startupLifecycle.transition("handshaking");
                 // The lifecycle is updated inside observeProviderStartup; these taps
                 // only log the already-recorded outcome.
@@ -3322,7 +3400,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     timeoutMs: Duration.toMillis(PROVIDER_START_SESSION_TIMEOUT),
                     startup: startupLifecycle.snapshot(),
                   });
-                  yield* adapter.stopSession(threadId).pipe(
+                  yield* stopAdapterSession(adapter, threadId).pipe(
                     Effect.timeoutOption(PROVIDER_STOP_SESSION_TIMEOUT),
                     Effect.catchCause((cause) =>
                       Effect.logWarning("failed to retire a timed-out provider session start", {
@@ -3453,7 +3531,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               const restoredAutoApproveSynaraTools =
                 input.autoApproveSynaraTools ?? previousAutoApproveSynaraTools;
               const previousCwd = readPersistedCwd(persistedBinding.runtimePayload);
-              yield* previousAdapter.stopSession(threadId);
+              yield* stopAdapterSession(previousAdapter, threadId);
 
               return yield* startAndPersistReplacement.pipe(
                 Effect.onExit((exit) =>
@@ -3464,7 +3542,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                         // If anything after the stop fails, retire a partially started
                         // replacement before restoring the exact previous generation.
                         if (replacementStarted) {
-                          yield* adapter.stopSession(threadId);
+                          yield* stopAdapterSession(adapter, threadId);
                         }
                         if (!previousSessionLive) return;
                         const restored = yield* previousAdapter.startSession({
@@ -3935,7 +4013,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             }
             // An earlier interrupted import may still own a subprocess even when
             // it never managed to persist a directory binding.
-            yield* adapter.stopSession(input.threadId);
+            yield* stopAdapterSession(adapter, input.threadId);
             // A first external import may establish the account's shared
             // continuation generation; persisted resume paths keep the stricter
             // prepared-source requirement.
@@ -4058,7 +4136,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               Effect.onExit((exit) =>
                 Exit.isSuccess(exit)
                   ? Effect.void
-                  : adapter.stopSession(input.threadId).pipe(
+                  : stopAdapterSession(adapter, input.threadId).pipe(
                       Effect.timeoutOption(PROVIDER_STOP_SESSION_TIMEOUT),
                       Effect.flatMap((stopped) =>
                         Option.isSome(stopped)
@@ -4714,6 +4792,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 operation: "ProviderService.steerSubagent",
                 allowRecovery: false,
               });
+              yield* assertRecordingReady(input.threadId);
               if (!routed.isActive) {
                 return yield* toValidationError(
                   "ProviderService.steerSubagent",
@@ -4794,6 +4873,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           }
           inheritedRuntimeGenerations.delete(input.threadId);
           if (response.kind === "approval") {
+            if (
+              response.input.decision === "accept" ||
+              response.input.decision === "acceptForSession"
+            )
+              yield* assertRecordingReady(input.threadId);
             yield* routed.adapter.respondToRequest(
               input.threadId,
               input.requestId,
@@ -4801,6 +4885,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             );
             return;
           }
+          yield* assertRecordingReady(input.threadId);
           yield* routed.adapter.respondToUserInput(
             input.threadId,
             input.requestId,
@@ -4872,7 +4957,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             // its durable drain. Neither may wait for the other to begin, and
             // one failure must not cancel the remaining cleanup/drain work.
             yield* settleConcurrentTeardowns(
-              [adapter.stopSession(input.threadId), flushRuntimeText(input.threadId)],
+              [stopAdapterSession(adapter, input.threadId), flushRuntimeText(input.threadId)],
               (teardown) => teardown,
             );
           }),
@@ -5172,7 +5257,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               // its generation current through both exit proof and text drain.
               if (!isExpectedIdleStopCurrent()) return;
               yield* settleConcurrentTeardowns(
-                [adapter.stopSession(input.threadId), flushRuntimeText(input.threadId)],
+                [stopAdapterSession(adapter, input.threadId), flushRuntimeText(input.threadId)],
                 (teardown) => teardown,
               );
               stoppedState = {
@@ -5339,7 +5424,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 ? yield* adapter.hasRetainedSession(input.threadId)
                 : hasActiveSession;
               if (hasRetainedSession && !preserveActive) {
-                yield* adapter.stopSession(input.threadId);
+                yield* stopAdapterSession(adapter, input.threadId);
               }
               if (!preserveActive) {
                 clearLiveRuntimeTasks(input.threadId);
@@ -5657,7 +5742,26 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           activeSessionWrites,
           ({ started }) => Deferred.await(started),
           { concurrency: "unbounded", discard: true },
-        ).pipe(Effect.andThen(settleConcurrentTeardowns(adapters, (adapter) => adapter.stopAll())));
+        ).pipe(
+          Effect.andThen(
+            settleConcurrentTeardowns(adapters, (adapter) =>
+              adapter.stopAll().pipe(
+                Effect.tap(() =>
+                  Effect.forEach(
+                    activeSessionByThreadId.values(),
+                    (entry) => {
+                      const generation = lifecycle.currentGeneration(entry.session.threadId);
+                      return captureState && entry.adapter === adapter && generation !== undefined
+                        ? captureState.close(entry.session.threadId, generation)
+                        : Effect.void;
+                    },
+                    { discard: true },
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
 
         // Each active-session write signals after it is queued on its per-thread
         // lock. Provider teardown can therefore begin without waiting for an
@@ -5719,6 +5823,62 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     );
 
     yield* Effect.addFinalizer(() => closeRuntimeEvents);
+
+    if (captureState) {
+      const recordingStops = new Set<string>();
+      const onRecordingFailure = (failure: NativeRecordingFailure) => {
+        const key = JSON.stringify([failure.threadId, failure.generation]);
+        if (recordingStops.has(key)) return;
+        const current = lifecycle.currentGeneration(failure.threadId);
+        if (current !== undefined && current !== failure.generation) return;
+        recordingStops.add(key);
+        const adapter = adapters.find((candidate) => candidate.provider === failure.provider);
+        const event: ProviderRuntimeEvent = {
+          type: "runtime.error",
+          eventId: EventId.makeUnsafe(`recording-failed:${failure.threadId}:${failure.generation}`),
+          provider: failure.provider,
+          providerInstanceId: failure.instanceId as import("@synara/contracts").ProviderInstanceId,
+          threadId: failure.threadId,
+          lifecycleGeneration: failure.generation,
+          createdAt: failure.createdAt,
+          payload: { message: NATIVE_RECORDING_FAILURE_MESSAGE },
+        };
+        const persistFailureEvent = (): Effect.Effect<void> =>
+          processRuntimeEvent(event).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.interrupt
+                : Effect.sleep(250).pipe(Effect.andThen(persistFailureEvent())),
+            ),
+          );
+        const retire = adapter
+          ? lifecycle
+              .runCurrentUrgent(failure.threadId, (generation) =>
+                generation !== undefined && generation !== failure.generation
+                  ? Effect.void
+                  : adapter.stopSession(failure.threadId),
+              )
+              .pipe(
+                Effect.catchCause(() =>
+                  Effect.logError("Recording failure runtime retirement could not be verified", {
+                    threadId: failure.threadId,
+                  }),
+                ),
+              )
+          : Effect.void;
+        Effect.runFork(
+          Effect.all([retire, persistFailureEvent()], {
+            concurrency: "unbounded",
+            discard: true,
+          }).pipe(
+            Effect.ensuring(Effect.sync(() => recordingStops.delete(key))),
+            Effect.forkIn(runtimeEventProducerScope),
+          ),
+        );
+      };
+      const unsubscribe = captureState.subscribe(onRecordingFailure);
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+    }
 
     return {
       startSession,

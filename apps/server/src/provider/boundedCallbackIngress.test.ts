@@ -74,6 +74,7 @@ describe("makeBoundedCallbackIngress", () => {
           const key = {};
           const releases: Array<() => void> = [];
           const published: string[] = [];
+          const discarded: string[] = [];
           const ingress = yield* makeBoundedCallbackIngress<TestItem, never, never, void>(
             (item) =>
               Effect.sync(() => {
@@ -85,6 +86,7 @@ describe("makeBoundedCallbackIngress", () => {
               terminalReserve: 1,
               sizeOf: () => 1,
               isTerminal: (item) => item.terminal === true,
+              onDiscard: (item, reason) => discarded.push(`${item.id}:${reason}`),
               prepareKey: (item) => item.key,
               prepareConcurrency: 2,
               prepare: () => new Promise<void>((resolve) => releases.push(resolve)),
@@ -96,6 +98,7 @@ describe("makeBoundedCallbackIngress", () => {
           expect(ingress.offer({ id: "terminal", terminal: true, key })).toBe("accepted");
           expect(ingress.status()).toMatchObject({ queued: 4, dropped: 7, terminalOverflow: 0 });
           expect(releases).toHaveLength(1);
+          expect(discarded).toEqual([3, 4, 5, 6, 7, 8, 9].map((id) => `delta-${id}:dropped`));
           releases[0]!();
           yield* Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
           expect(releases).toHaveLength(2);
@@ -112,6 +115,7 @@ describe("makeBoundedCallbackIngress", () => {
         Effect.gen(function* () {
           const releases = new Map<string, (metadata: string) => void>();
           const processed: string[] = [];
+          const discarded: string[] = [];
           const ingress = yield* makeBoundedCallbackIngress<TestItem, never, never, string>(
             (item, metadata) =>
               Effect.sync(() => {
@@ -123,6 +127,7 @@ describe("makeBoundedCallbackIngress", () => {
               terminalReserve: 1,
               isTerminal: (item) => item.terminal === true,
               sizeOf: (item) => item.bytes ?? 50,
+              onDiscard: (item, reason) => discarded.push(`${item.id}:${reason}`),
               prepareConcurrency: 2,
               prepare: ({ id }) =>
                 id === "rejected"
@@ -148,6 +153,7 @@ describe("makeBoundedCallbackIngress", () => {
           releases.get("terminal")!("terminal");
           yield* Fiber.join(stopped);
           expect(processed).toEqual(["head:head", "terminal:terminal"]);
+          expect(discarded).toEqual(["evicted:evicted-for-terminal"]);
           expect(ingress.status()).toMatchObject({
             accepting: false,
             queuedBytes: 0,

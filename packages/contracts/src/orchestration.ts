@@ -21,6 +21,7 @@ import {
   DEFAULT_MODEL_BY_PROVIDER,
 } from "./model";
 import { ProviderInstanceId } from "./providerInstance";
+import { NativeCaptureId } from "./durableInformation";
 import {
   UsageLimitRecovery,
   UsageLimitRecoveryFields,
@@ -2702,6 +2703,7 @@ export const ThreadActivityAppendedPayload = Schema.Struct({
 });
 
 export const OrchestrationEventMetadata = Schema.Struct({
+  nativeCaptureIds: Schema.optional(Schema.Array(NativeCaptureId)),
   checkpointRuntimeSequence: Schema.optional(NonNegativeInt),
   providerTurnId: Schema.optional(TrimmedNonEmptyString),
   providerItemId: Schema.optional(ProviderItemId),

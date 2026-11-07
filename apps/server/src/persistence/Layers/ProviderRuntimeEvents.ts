@@ -3,6 +3,7 @@ import { Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { stripDiagnosticImages } from "../../provider/stripDiagnosticImages.ts";
+import { isLosslessRuntimeText } from "../../provider/providerRuntimeEventIngress.ts";
 import {
   PersistenceDecodeError,
   toPersistenceDecodeError,
@@ -111,7 +112,9 @@ const encodePersistableEvent = (event: ProviderRuntimeEvent) =>
     // budget), while source/method/messageType survive for diagnostics.
     const compactedEvent = {
       ...event,
-      payload: shrinkRuntimeEventStrings(event.payload),
+      payload: isLosslessRuntimeText(event)
+        ? event.payload
+        : shrinkRuntimeEventStrings(event.payload),
       ...(event.raw !== undefined
         ? {
             raw: {
@@ -153,6 +156,30 @@ const make = Effect.gen(function* () {
       const appendResult = yield* sql
         .withTransaction(
           Effect.gen(function* () {
+            if (event.nativeCaptureId) {
+              const sources = yield* sql<{
+                provider: string;
+                instance: string;
+                generation: string;
+                threadId: string;
+              }>`SELECT provider,
+                provider_instance_id AS instance, lifecycle_generation AS generation, thread_id AS "threadId"
+                FROM native_captures WHERE capture_id = ${event.nativeCaptureId}`;
+              const source = sources[0];
+              if (
+                !source ||
+                source.provider !== event.provider ||
+                source.threadId !== event.threadId ||
+                (event.providerInstanceId !== undefined &&
+                  source.instance !== event.providerInstanceId) ||
+                (event.lifecycleGeneration !== undefined &&
+                  source.generation !== event.lifecycleGeneration)
+              )
+                return yield* new PersistenceDecodeError({
+                  operation: "ProviderRuntimeEvent.append.nativeCapture",
+                  issue: "Native capture provenance is unavailable or belongs to another runtime.",
+                });
+            }
             // SQLite reserves the AUTOINCREMENT rowid before conflict handling, so duplicate event
             // IDs consume sequence values. Sequence is a cursor, not a dense counter; gaps are valid.
             const inserted = yield* sql<Record<string, unknown>>`
@@ -179,7 +206,11 @@ const make = Effect.gen(function* () {
             return { inserted: false as const, row: existing[0] };
           }),
         )
-        .pipe(Effect.mapError(toPersistenceSqlError("ProviderRuntimeEvent.append")));
+        .pipe(
+          Effect.catchTag("SqlError", (cause) =>
+            Effect.fail(toPersistenceSqlError("ProviderRuntimeEvent.append")(cause)),
+          ),
+        );
       const persisted = appendResult.inserted
         ? yield* decodeSequenceRow(appendResult.row).pipe(
             Effect.map((row) => ({ sequence: row.sequence, eventJson })),

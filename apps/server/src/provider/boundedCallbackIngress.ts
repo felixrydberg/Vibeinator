@@ -36,6 +36,10 @@ export interface BoundedCallbackIngress<A> {
 }
 
 export interface BoundedCallbackIngressOptions<A, P = never> {
+  readonly onDiscard?: (
+    item: A,
+    reason: "dropped" | "terminal-overflow" | "evicted-for-terminal",
+  ) => void;
   readonly capacity: number;
   readonly maxBufferedBytes: number;
   readonly terminalReserve: number;
@@ -217,9 +221,11 @@ export const makeBoundedCallbackIngress = <A, E, R, P = never>(
       if (bytes > maxBufferedBytes) {
         if (terminal) {
           terminalOverflow += 1;
+          options.onDiscard?.(item, "terminal-overflow");
           return "terminal-overflow";
         }
         dropped += 1;
+        options.onDiscard?.(item, "dropped");
         return "dropped";
       }
       const buffered: BufferedItem<A, P> = { item, bytes, terminal };
@@ -236,6 +242,7 @@ export const makeBoundedCallbackIngress = <A, E, R, P = never>(
       if (!terminal) {
         if (buffer.length >= normalCapacity || !fitsByteBudget()) {
           dropped += 1;
+          options.onDiscard?.(item, "dropped");
           return "dropped";
         }
         buffer.push(buffered);
@@ -250,10 +257,12 @@ export const makeBoundedCallbackIngress = <A, E, R, P = never>(
         const evictIndex = buffer.findIndex((candidate) => !candidate.terminal);
         if (evictIndex < 0) {
           terminalOverflow += 1;
+          options.onDiscard?.(item, "terminal-overflow");
           return "terminal-overflow";
         }
         const [removed] = buffer.splice(evictIndex, 1);
         if (removed) {
+          if (removed.item !== undefined) options.onDiscard?.(removed.item, "evicted-for-terminal");
           discard(removed);
           queuedBytes = Math.max(0, queuedBytes - removed.bytes);
           dropped += 1;

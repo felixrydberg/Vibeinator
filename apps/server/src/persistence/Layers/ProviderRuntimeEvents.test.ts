@@ -843,19 +843,19 @@ layer("ProviderRuntimeEventRepository", (it) => {
     }),
   );
 
-  it.effect("journals an oversized raw-less event by truncating its payload leaves", () =>
-    Effect.gen(function* () {
-      const repository = yield* ProviderRuntimeEventRepository;
-      const oversizedDelta = "y".repeat(PROVIDER_RUNTIME_EVENT_MAX_BYTES * 2);
-      const oversizedEvent = runtimeEvent("runtime-event-oversized-payload", oversizedDelta);
+  it.effect(
+    "rejects an unsplit oversized assistant delta instead of silently clipping replay text",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* ProviderRuntimeEventRepository;
+        const oversizedDelta = "y".repeat(PROVIDER_RUNTIME_EVENT_MAX_BYTES * 2);
+        const oversizedEvent = runtimeEvent("runtime-event-oversized-payload", oversizedDelta);
+        const before = yield* repository.getHighWaterSequence;
 
-      const persisted = yield* repository.append(oversizedEvent);
-      assert.strictEqual(persisted.event.eventId, oversizedEvent.eventId);
-      assert.strictEqual(persisted.event.raw, undefined);
-      if (persisted.event.type === "content.delta") {
-        assert.isBelow(persisted.event.payload.delta.length, oversizedDelta.length);
-      }
-    }),
+        const failure = yield* Effect.flip(repository.append(oversizedEvent));
+        assert.strictEqual(failure._tag, "PersistenceDecodeError");
+        assert.strictEqual(yield* repository.getHighWaterSequence, before);
+      }),
   );
 
   it.effect("still rejects an event whose oversized bulk is not string leaves", () =>
