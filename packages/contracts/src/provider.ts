@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { NativeCaptureId } from "./durableInformation";
 import { TrimmedNonEmptyString } from "./baseSchemas";
 import {
   ApprovalRequestId,
@@ -228,6 +229,7 @@ export type ProviderRespondToUserInputInput = typeof ProviderRespondToUserInputI
 const ProviderEventKind = Schema.Literals(["session", "notification", "request", "error"]);
 
 export const ProviderEvent = Schema.Struct({
+  nativeCaptureId: Schema.optional(NativeCaptureId),
   id: EventId,
   kind: ProviderEventKind,
   provider: ProviderDriverKind,

@@ -7,6 +7,7 @@ import {
   ApprovalRequestId,
   BROWSER_TOOL_NAMES,
   EventId,
+  type NativeCaptureId,
   type ProviderStartOptions,
   type ProviderComposerCapabilities,
   ProviderItemId,
@@ -125,6 +126,13 @@ import {
   parseCodexSkillsListResponse,
 } from "./provider/codexDiscoveryCatalog.ts";
 
+import {
+  codexCaptureExclusion,
+  codexPublishedPayload,
+  type CodexNativeCaptureFactory,
+  type CodexNativeCaptureLane,
+} from "./provider/codexNativeCapture.ts";
+
 const log = createLogger("codex");
 
 const MCP_SERVER_ELICITATION_REQUEST_METHOD = "mcpServer/elicitation/request";
@@ -210,6 +218,9 @@ type CodexSessionApprovalOverride = {
 export class CodexSessionAuthInvalidatedError extends Error {}
 
 interface CodexSessionContext {
+  nativeCapture?: CodexNativeCaptureLane;
+  nativeServerRequests?: Map<string, string>;
+  nativeSensitiveRequests?: Set<string>;
   authInvalidation?: string;
   readonly autoApproveSynaraTools?: boolean;
   readonly enableComputerControl?: boolean;
@@ -1293,6 +1304,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
   // they settle, even after the caller's deadline rejects its session origin.
   // Stay below libuv's default four-worker pool so auth reads cannot occupy it all.
   private readonly authReadSlots = Semaphore.makeUnsafe(2);
+  private readonly nativeCaptureFactory: CodexNativeCaptureFactory | undefined;
 
   /** Codex deep-merges MCP tables: never mix a connector with the user's server. */
   private async gatewayThreadConfig(
@@ -1343,11 +1355,13 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       readonly taskCompleteFallbackGraceMs?: number;
       readonly discoverySessionIdleMs?: number;
       readonly authRevalidationTimeoutMs?: number;
+      readonly nativeCapture?: CodexNativeCaptureFactory;
     },
   ) {
     super();
     this.runPromise = services ? Effect.runPromiseWith(services) : Effect.runPromise;
     this.synaraSkillsDir = options?.synaraSkillsDir;
+    this.nativeCaptureFactory = options?.nativeCapture;
     this.agentGatewayMcp = options?.agentGatewayMcp;
     this.spawnAppServer = options?.spawnAppServer ?? spawnCodexAppServer;
     this.teardownProcessTree = options?.teardownProcessTree ?? teardownProviderProcessTree;
@@ -1549,7 +1563,6 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       // with its own 20-second deadline.
       try {
         const accountReadResponse = await this.sendRequest(context, "account/read", {});
-        log.info("account/read response", { accountReadResponse });
         context.account = readCodexAccountSnapshot(accountReadResponse);
         log.info("subscription status", {
           type: context.account.type,
@@ -3278,7 +3291,8 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       ? settleBeforeTeardown.then(() => this.teardownContextProcess(context))
       : this.teardownContextProcess(context);
     stopPromise = teardown.then(
-      () => {
+      async () => {
+        await context.nativeCapture?.drain();
         if (this.sessions.get(threadId) === context) {
           this.sessions.delete(threadId);
         }
@@ -4232,14 +4246,17 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     const onStdoutData = (chunk: Buffer) => {
       if (context.stopping) return;
       try {
+        if (this.nativeCaptureLane(context)) context.child.stdout.pause();
         for (const line of context.stdoutFramer.push(chunk)) {
           this.handleStdoutLine(context, line);
         }
+        if (context.nativeCapture?.pending() === 0 && !context.stopping)
+          context.child.stdout.resume();
       } catch (cause) {
         this.handleTransportFailure(context, cause);
       }
     };
-    const onStdoutEnd = () => {
+    const finishStdout = () => {
       if (context.stopping) return;
       try {
         context.stdoutFramer.finish();
@@ -4254,6 +4271,10 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       } catch (cause) {
         this.handleTransportFailure(context, cause);
       }
+    };
+    const onStdoutEnd = () => {
+      if (context.nativeCapture?.pending()) void context.nativeCapture.drain().then(finishStdout);
+      else finishStdout();
     };
     context.child.stdout.on("data", onStdoutData);
     context.child.stdout.once("end", onStdoutEnd);
@@ -4282,7 +4303,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
     context.child.on("error", (error) => this.handleTransportFailure(context, error));
 
-    context.child.on("exit", (code, signal) => {
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
       if (context.stopping && context.failureStopping !== true) {
         return;
       }
@@ -4308,6 +4329,11 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       // Retire resources promptly while retaining the replacement barrier until
       // teardown settles. Post-exit capture keeps startup failures uncertain.
       this.stopFailedContext(context);
+    };
+    context.child.on("exit", (code, signal) => {
+      if (context.nativeCapture?.pending())
+        void context.nativeCapture.drain().then(() => onExit(code, signal));
+      else onExit(code, signal);
     });
   }
 
@@ -4388,15 +4414,78 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       return;
     }
 
+    const lane = this.nativeCaptureLane(context);
+    if (!lane) {
+      this.dispatchNativeMessage(context, parsed);
+      return;
+    }
+    const isResponse = this.isResponse(parsed);
+    const method =
+      typeof protocolEnvelope.method === "string"
+        ? protocolEnvelope.method
+        : isResponse
+          ? (context.pending.get(String(protocolEnvelope.id))?.method ?? "rpc/unmatchedResponse")
+          : "rpc/unrecognized";
+    const sensitiveResponse =
+      isResponse &&
+      protocolEnvelope.error !== undefined &&
+      (context.nativeSensitiveRequests?.has(String(protocolEnvelope.id)) === true ||
+        codexCaptureExclusion(method, protocolEnvelope) !== undefined);
+    // Credential/setup errors can echo secrets in free-form messages or data.
+    const errorCode = asObject(protocolEnvelope.error)?.code;
+    const dispatchMessage = sensitiveResponse
+      ? {
+          ...protocolEnvelope,
+          error: {
+            code: typeof errorCode === "number" ? errorCode : -32000,
+            message:
+              errorCode === -32601 ? "Method not found" : "Codex credential/setup request failed.",
+          },
+        }
+      : parsed;
+    void lane
+      .record({
+        direction: "incoming",
+        method,
+        rawJson: rawLine,
+        envelope: protocolEnvelope,
+        nativeSessionId: readResumeCursorThreadId(context.session.resumeCursor),
+        sensitiveResponse,
+      })
+      .then((captureId) => {
+        if (!context.stopping) this.dispatchNativeMessage(context, dispatchMessage, captureId);
+      })
+      .catch((cause) => this.handleTransportFailure(context, cause))
+      .finally(() => {
+        if (!context.stopping && lane.pending() === 0) context.child.stdout.resume();
+      });
+  }
+
+  private dispatchNativeMessage(
+    context: CodexSessionContext,
+    parsed: unknown,
+    captureId?: NativeCaptureId,
+  ): void {
     if (this.isServerRequest(parsed)) {
-      void this.handleServerRequest(context, parsed).catch((cause) =>
+      if (context.nativeCapture) {
+        context.nativeServerRequests ??= new Map();
+        if (context.nativeServerRequests.size >= 256) {
+          this.handleTransportFailure(
+            context,
+            new Error("Codex native request capture capacity exceeded."),
+          );
+          return;
+        }
+        context.nativeServerRequests.set(JSON.stringify(parsed.id), parsed.method);
+      }
+      void this.handleServerRequest(context, parsed, captureId).catch((cause) =>
         this.handleTransportFailure(context, cause),
       );
       return;
     }
 
     if (this.isServerNotification(parsed)) {
-      this.handleServerNotification(context, parsed);
+      this.handleServerNotification(context, parsed, captureId);
       return;
     }
 
@@ -4415,6 +4504,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
   private handleServerNotification(
     context: CodexSessionContext,
     notification: JsonRpcNotification,
+    captureId?: NativeCaptureId,
   ): void {
     const rawRoute = this.readRouteFields(notification.params);
     this.rememberCollabReceiverTurns(context, notification.params, rawRoute.turnId);
@@ -4507,6 +4597,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ? { lifecycleGeneration: context.lifecycleGeneration }
         : {}),
       method: notification.method,
+      ...(captureId ? { nativeCaptureId: captureId } : {}),
       ...(rawRoute.turnId ? { turnId: rawRoute.turnId } : {}),
       ...(childParentTurnId ? { parentTurnId: childParentTurnId } : {}),
       ...(rawRoute.itemId ? { itemId: rawRoute.itemId } : {}),
@@ -4717,6 +4808,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
   private async handleServerRequest(
     context: CodexSessionContext,
     request: JsonRpcRequest,
+    captureId?: NativeCaptureId,
   ): Promise<void> {
     const rawRoute = this.readRouteFields(request.params);
     const resolvedCollaborationRoute = this.resolveCollaborationRoute(context, request.params);
@@ -4853,6 +4945,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ? { lifecycleGeneration: context.lifecycleGeneration }
         : {}),
       method: request.method,
+      ...(captureId ? { nativeCaptureId: captureId } : {}),
       ...(rawRoute.turnId ? { turnId: rawRoute.turnId } : {}),
       ...(childParentTurnId ? { parentTurnId: childParentTurnId } : {}),
       ...(rawRoute.itemId ? { itemId: rawRoute.itemId } : {}),
@@ -4934,6 +5027,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         timeoutMs,
       )
       .finally(() => {
+        context.nativeSensitiveRequests?.delete(String(id));
         this.restartDiscoverySessionIdleTimer(context);
       });
 
@@ -4960,11 +5054,60 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     return this.sendRequest(context, method, params);
   }
 
-  private writeMessage(context: CodexSessionContext, message: unknown): Promise<void> {
-    return context.stdinWriter.write(message).catch((cause) => {
+  private nativeCaptureLane(context: CodexSessionContext): CodexNativeCaptureLane | undefined {
+    if (context.discovery || !this.nativeCaptureFactory) return undefined;
+    context.nativeCapture ??= this.nativeCaptureFactory({
+      threadId: context.session.threadId,
+      providerInstanceId: context.session.providerInstanceId ?? "codex",
+      runtimeSessionId: context.sessionAttemptId,
+      lifecycleGeneration: context.lifecycleGeneration ?? context.sessionAttemptId,
+    });
+    return context.nativeCapture;
+  }
+
+  private async writeMessage(context: CodexSessionContext, message: unknown): Promise<void> {
+    const lane = this.nativeCaptureLane(context);
+    if (!lane)
+      return context.stdinWriter.write(message).catch((cause) => {
+        this.handleTransportFailure(context, cause);
+        throw cause;
+      });
+    const allowedWhileStopping = context.stopping;
+    try {
+      const rawJson = JSON.stringify(message);
+      const envelope = JSON.parse(rawJson) as Record<string, unknown>;
+      const isRequest = typeof envelope.method === "string";
+      const method = isRequest
+        ? (envelope.method as string)
+        : (context.nativeServerRequests?.get(JSON.stringify(envelope.id)) ??
+          "rpc/unmatchedResponse");
+      if (isRequest && envelope.id !== undefined && codexCaptureExclusion(method, envelope)) {
+        context.nativeSensitiveRequests ??= new Set();
+        context.nativeSensitiveRequests.add(String(envelope.id));
+      }
+      await lane.record({
+        direction: "outgoing",
+        method,
+        rawJson,
+        envelope,
+        nativeSessionId: readResumeCursorThreadId(context.session.resumeCursor),
+      });
+      if (
+        (!allowedWhileStopping && context.stopping) ||
+        context.child.exitCode !== null ||
+        context.child.signalCode !== null
+      )
+        throw new Error("Codex session closed before captured write.");
+      // The child may need stdout drained before it can consume a large stdin frame.
+      if (!context.stopping && lane.pending() === 0) context.child.stdout.resume();
+      await context.stdinWriter.write(envelope);
+      if (!isRequest) context.nativeServerRequests?.delete(JSON.stringify(envelope.id));
+    } catch (cause) {
       this.handleTransportFailure(context, cause);
       throw cause;
-    });
+    } finally {
+      if (!context.stopping && lane.pending() === 0) context.child.stdout.resume();
+    }
   }
 
   private markSessionReadyAfterThreadOpen(
@@ -5040,7 +5183,8 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
   }
 
   private emitEvent(event: ProviderEvent): void {
-    this.emit("event", event);
+    const payload = codexPublishedPayload(event.method, event.payload);
+    this.emit("event", payload === event.payload ? event : { ...event, payload });
   }
 
   private clearTaskCompleteFallback(context: CodexSessionContext, turnId?: TurnId): void {

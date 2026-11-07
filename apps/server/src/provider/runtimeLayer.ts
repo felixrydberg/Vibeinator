@@ -27,6 +27,8 @@ import { makeDurableProviderServiceLive } from "./Layers/ProviderService";
 import { ProviderSessionDirectoryLive } from "./Layers/ProviderSessionDirectory";
 import { ProviderSessionRuntimeRepositoryLive } from "../persistence/Layers/ProviderSessionRuntime";
 import { ProviderRuntimeEventRepositoryLive } from "../persistence/Layers/ProviderRuntimeEvents";
+import { NativeArchiveRepositoryLive } from "../persistence/Layers/NativeArchive";
+import { makeCodexNativeCapture } from "./codexNativeCapture";
 
 export function makeServerProviderLayer(
   options: {
@@ -56,9 +58,11 @@ export function makeServerProviderLayer(
     // the same MCP catalog/dispatcher through its native custom-tool API.
     const agentGatewayCredentialsLayer =
       options.agentGatewayCredentialsLayer ?? AgentGatewayCredentialsWithSecretsLive;
-    const codexAdapterLayer = makeCodexAdapterLive(
-      nativeEventLogger ? { nativeEventLogger } : undefined,
-    ).pipe(Layer.provide(agentGatewayCredentialsLayer));
+    const nativeCapture = yield* makeCodexNativeCapture;
+    const codexAdapterLayer = makeCodexAdapterLive({
+      nativeCapture,
+      ...(nativeEventLogger ? { nativeEventLogger } : {}),
+    }).pipe(Layer.provide(agentGatewayCredentialsLayer));
     const claudeAdapterLayer = makeClaudeAdapterLive(
       nativeEventLogger ? { nativeEventLogger } : undefined,
     ).pipe(Layer.provide(agentGatewayCredentialsLayer));
@@ -127,5 +131,9 @@ export function makeServerProviderLayer(
       adapterRegistryLayer,
       providerSessionDirectoryLayer,
     );
-  }).pipe(Effect.provide(ProviderCredentialsLive.pipe(Layer.orDie)), Layer.unwrap);
+  }).pipe(
+    Effect.provide(ProviderCredentialsLive.pipe(Layer.orDie)),
+    Effect.provide(NativeArchiveRepositoryLive),
+    Layer.unwrap,
+  );
 }

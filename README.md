@@ -2,7 +2,7 @@
 
 A desktop app for working with Codex and Claude while preserving project context across sessions and provider switches.
 
-Status: the desktop baseline and SQLite archive storage are implemented. Conversations restore paused after restart; provider capture integration and handoff changes remain planned.
+Status: the desktop baseline, SQLite archive storage and Codex native capture are implemented. Conversations restore paused after restart; Claude capture and handoff changes remain planned.
 
 The [Synara audit](docs/SYNARA-AUDIT.md) maps the existing implementation and confirmed gaps. The [implementation draft](docs/IMPLEMENTATION-DRAFT.md) defines issues, dependencies, acceptance criteria, and milestone order. The [tracker](docs/IMPLEMENTATION-TRACKER.md) links twenty GitHub issues and records delivery state. The [adoption report](docs/BASELINE-ADOPTION.md) records passing checks and remaining qualification. [UPSTREAM.md](UPSTREAM.md) records the source revision and retained notices.
 
@@ -46,7 +46,7 @@ SQLite is the full source of truth. Store projects, chats, goals, turns, provide
 
 The [durable information contract](docs/DURABLE-INFORMATION.md) defines the storage records, source identities, migration/backout rules and synthetic upgrade fixtures. Full conversation and objective text belongs in SQLite. Binary attachment bytes remain in the existing managed file store with durable SQLite metadata, availability and references; a SQLite-only backup does not include those external bytes. Retain WAL/NORMAL durability across process crashes; recent commits may be lost after an OS crash or power failure.
 
-The [archive storage layer](docs/NATIVE-ARCHIVE.md) provides transactional, chunked payloads, integrity-checked paged reads and a resumable backfill of surviving normalized content. Provider-native capture before clipping is the next integration step. Old materialized-goal file references are explicitly marked as not imported, rather than presented as recovered full objectives.
+The [archive storage layer](docs/NATIVE-ARCHIVE.md) provides transactional, chunked payloads, integrity-checked paged reads and a resumable backfill of surviving normalized content. [Codex native capture](docs/CODEX-CAPTURE.md) records owned coding-session protocol frames before preview clipping or dispatch, with credential exclusions and bounded backpressure. Claude capture and shared projection/replay guarantees follow in VIB-006/007. Old materialized-goal file references are explicitly marked as not imported, rather than presented as recovered full objectives.
 
 Extend the existing event store, schema, migrations, and UI projections where practical. Audit which raw and normalized events Synara already persists, then add the missing capture and metadata at those boundaries. Maintain one authoritative conversation history and keep retained UI projections consistent with it. Schema changes must preserve existing conversations and be verified against a database from the pinned baseline.
 

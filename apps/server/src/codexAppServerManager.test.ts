@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { Effect, ServiceMap } from "effect";
+import { Deferred, Effect, Fiber, Layer, ServiceMap, Stream, type Scope } from "effect";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { ServerSettingsService } from "./serverSettings";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -24,6 +26,8 @@ import {
   BROWSER_TOOL_NAMES,
   DEFAULT_MODEL_BY_PROVIDER,
   ThreadId,
+  ProjectId,
+  type ProviderEvent,
   TurnId,
   type RuntimeMode,
 } from "@synara/contracts";
@@ -72,6 +76,19 @@ import {
   MINIMUM_CODEX_EXCLUDE_TURNS_CLI_VERSION,
   CODEX_CLI_UNPARSEABLE_VERSION_MESSAGE,
 } from "./provider/codexCliVersion.ts";
+import {
+  makeCodexNativeCapture,
+  type CodexNativeCaptureFactory,
+} from "./provider/codexNativeCapture.ts";
+import { NativeArchiveRepository } from "./persistence/Services/NativeArchive.ts";
+import { NativeArchiveRepositoryLive } from "./persistence/Layers/NativeArchive.ts";
+import * as NodeSqliteClient from "./persistence/NodeSqliteClient.ts";
+import { runMigrations } from "./persistence/Migrations.ts";
+import { makeCodexAdapterLive } from "./provider/Layers/CodexAdapter.ts";
+import { CodexAdapter } from "./provider/Services/CodexAdapter.ts";
+import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory.ts";
+import { ProviderSessionRuntimeRepositoryLive } from "./persistence/Layers/ProviderSessionRuntime.ts";
+import { ServerConfig } from "./config.ts";
 
 const asThreadId = (value: string): ThreadId => ThreadId.makeUnsafe(value);
 
@@ -82,6 +99,7 @@ type SyntheticCodexRequest = {
 };
 
 function createSyntheticCodexAppServer(options?: {
+  readonly accountReadError?: string;
   readonly mcpServers?: Record<string, unknown>;
   readonly projectMcpServers?: Record<string, unknown>;
   readonly forceFullHistoryResponse?: boolean;
@@ -101,8 +119,11 @@ function createSyntheticCodexAppServer(options?: {
   const historyFingerprint = () =>
     createHash("sha256").update(JSON.stringify(persistedTranscript)).digest("hex");
   const requests: SyntheticCodexRequest[] = [];
+  const replies: Array<{ id: string | number; result?: unknown; error?: unknown }> = [];
   const historicalResponses: Array<{ readonly thread: { readonly id: string } }> = [];
-  const children: ChildProcessWithoutNullStreams[] = [];
+  const children: Array<
+    ChildProcessWithoutNullStreams & { stdin: PassThrough; stdout: PassThrough }
+  > = [];
   let oversizedResponseCount = 0;
   let nextPid = 50_000;
   let nextTurn = 1;
@@ -134,7 +155,7 @@ function createSyntheticCodexAppServer(options?: {
       exitCode: null,
       signalCode: null,
       killed: false,
-    }) as unknown as ChildProcessWithoutNullStreams;
+    }) as unknown as ChildProcessWithoutNullStreams & { stdin: PassThrough; stdout: PassThrough };
     children.push(child);
 
     let bufferedInput = "";
@@ -148,6 +169,10 @@ function createSyntheticCodexAppServer(options?: {
         bufferedInput = bufferedInput.slice(newline + 1);
         if (!line) continue;
         const request = JSON.parse(line) as SyntheticCodexRequest;
+        if (typeof request.method !== "string") {
+          replies.push(JSON.parse(line));
+          continue;
+        }
         requests.push(request);
         if (request.id === undefined) continue;
 
@@ -157,7 +182,16 @@ function createSyntheticCodexAppServer(options?: {
         if (request.method === "initialize") {
           respond({});
         } else if (request.method === "account/read") {
-          respond({ account: { type: "apiKey" } });
+          if (options?.accountReadError) {
+            queueMicrotask(() =>
+              stdout.write(
+                JSON.stringify({
+                  id: request.id,
+                  error: { code: -32000, message: options.accountReadError },
+                }) + "\n",
+              ),
+            );
+          } else respond({ account: { type: "apiKey" } });
         } else if (request.method === "thread/unsubscribe") {
           if (options?.gatewayRenewal === "unsupported") {
             queueMicrotask(() =>
@@ -282,6 +316,7 @@ function createSyntheticCodexAppServer(options?: {
     historicalResponses,
     transcriptSnapshot: () => structuredClone(persistedTranscript),
     requests,
+    replies,
     spawnAppServer,
     get oversizedResponseCount() {
       return oversizedResponseCount;
@@ -341,12 +376,14 @@ function createSyntheticCodexManager(
   fake: ReturnType<typeof createSyntheticCodexAppServer>,
   services?: ConstructorParameters<typeof CodexAppServerManager>[0],
   gateway?: NonNullable<ConstructorParameters<typeof CodexAppServerManager>[1]>["agentGatewayMcp"],
+  nativeCapture?: CodexNativeCaptureFactory,
 ) {
   const teardownProcessTree = vi.fn(async () => ({ escalated: false, signalErrors: [] }));
   const manager = new CodexAppServerManager(services, {
     spawnAppServer: fake.spawnAppServer,
     teardownProcessTree,
     ...(gateway ? { agentGatewayMcp: gateway } : {}),
+    ...(nativeCapture ? { nativeCapture } : {}),
   });
   const internals = manager as unknown as {
     assertSupportedCodexCliVersion: () => Promise<void>;
@@ -364,6 +401,480 @@ function createSyntheticCodexManager(
   });
   return { manager, teardownProcessTree };
 }
+
+describe("Codex durable native capture", () => {
+  const scope = {
+    projectId: ProjectId.makeUnsafe("capture-project"),
+    threadId: asThreadId("capture-thread"),
+  };
+  const timestamp = "2026-11-07T00:00:00.000Z";
+  const run = <A, E>(
+    program: Effect.Effect<A, E, SqlClient.SqlClient | NativeArchiveRepository | Scope.Scope>,
+  ) =>
+    Effect.runPromise(
+      program.pipe(
+        Effect.provide(NativeArchiveRepositoryLive),
+        Effect.provide(NodeSqliteClient.layerMemory()),
+        Effect.scoped,
+      ),
+    );
+  const setup = (options?: Parameters<typeof createSyntheticCodexAppServer>[0]) =>
+    Effect.gen(function* () {
+      yield* runMigrations();
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO projection_projects(project_id, title, workspace_root, scripts_json, created_at, updated_at)
+      VALUES (${scope.projectId}, 'Synthetic', '/synthetic', '[]', ${timestamp}, ${timestamp})`;
+      yield* sql`INSERT INTO projection_threads(thread_id, project_id, title, created_at, updated_at)
+      VALUES (${scope.threadId}, ${scope.projectId}, 'Synthetic', ${timestamp}, ${timestamp})`;
+      const nativeCapture = yield* makeCodexNativeCapture;
+      const fake = createSyntheticCodexAppServer(options);
+      const { manager } = createSyntheticCodexManager(fake, undefined, undefined, nativeCapture);
+      const events: ProviderEvent[] = [];
+      manager.on("event", (event) => events.push(event));
+      const start = (generation = "generation-1") =>
+        manager.startSession({
+          threadId: scope.threadId,
+          provider: "codex",
+          cwd: process.cwd(),
+          runtimeMode: "approval-required",
+          lifecycleGeneration: generation,
+          agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+        });
+      yield* Effect.addFinalizer(() => Effect.promise(() => manager.stopAll()));
+      yield* Effect.promise(() => start());
+      return { manager, fake, events, start, sql };
+    });
+  const captures = Effect.gen(function* () {
+    const archive = yield* NativeArchiveRepository;
+    return yield* archive.listCaptures({
+      ...scope,
+      afterSequence: 0,
+      throughSequence: yield* archive.getHighWaterSequence(scope),
+      limit: 100,
+    });
+  });
+  const contents = Effect.gen(function* () {
+    const archive = yield* NativeArchiveRepository;
+    return yield* Effect.forEach(yield* captures, (capture) =>
+      Effect.gen(function* () {
+        const text =
+          capture.disposition === "retained"
+            ? Buffer.concat(
+                (yield* Stream.runCollect(
+                  archive.streamPayload({ ...scope, payloadId: capture.payload.payloadId }),
+                )).map((part) => Buffer.from(part)),
+              ).toString("utf8")
+            : undefined;
+        return { capture, text };
+      }),
+    );
+  });
+  const waitFor = (predicate: () => boolean, timeout = 3000) =>
+    Effect.promise(() => vi.waitFor(() => expect(predicate()).toBe(true), { timeout }));
+
+  it("archives exact large/unknown frames before compaction and links the bounded runtime preview", async () => {
+    await run(
+      Effect.gen(function* () {
+        const { manager, fake, events } = yield* setup();
+        const output = "🙂\0日本語\r\n".repeat(180_000) + "END_SENTINEL";
+        const raw = ` { "method" : "item/completed", "params" : ${JSON.stringify({
+          threadId: "fresh-provider-thread",
+          turnId: "turn-1",
+          item: {
+            id: "tool-1",
+            type: "commandExecution",
+            command: "synthetic",
+            status: "completed",
+            aggregatedOutput: output,
+            exitCode: 0,
+          },
+        })} } `;
+        const unknown =
+          '{"method":"future/unknown","params":{"threadId":"fresh-provider-thread","turnId":"turn-1","itemId":"future-1","opaque":"日本語\\u0000future"}}';
+        yield* Effect.gen(function* () {
+          const adapter = yield* CodexAdapter;
+          const next = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "item.completed"),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          // Split a UTF-8 code point across chunks; framing must preserve the raw JSON.
+          const wire = Buffer.from(raw + "\r\n" + unknown + "\n");
+          const split = wire.indexOf(Buffer.from("🙂")) + 1;
+          fake.children[0]!.stdout.emit("data", wire.subarray(0, split));
+          fake.children[0]!.stdout.emit("data", wire.subarray(split));
+          const result = yield* Fiber.join(next);
+          expect(result._tag).toBe("Some");
+          if (result._tag !== "Some") throw new Error("No runtime preview");
+          expect(result.value.raw?.payload).toMatchObject({ synaraTruncated: true });
+          // Preserve the existing normalized tool output; only its diagnostic copy clips.
+          expect(JSON.stringify(result.value.payload)).toContain("END_SENTINEL");
+          const rows = yield* contents;
+          const stored = rows.find((row) => row.text === raw)!;
+          expect(stored).toBeDefined();
+          expect(result.value.nativeCaptureId).toBe(stored.capture.captureId);
+        }).pipe(
+          Effect.provide(
+            makeCodexAdapterLive({ manager }).pipe(
+              Layer.provide(ServerConfig.layerTest(process.cwd(), process.cwd())),
+              Layer.provide(
+                ProviderSessionDirectoryLive.pipe(
+                  Layer.provide(ProviderSessionRuntimeRepositoryLive),
+                ),
+              ),
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
+        );
+        yield* waitFor(() => events.some((event) => event.method === "future/unknown"));
+        yield* Effect.promise(() => manager.stopAll());
+        const rows = yield* contents;
+        expect(rows.filter((row) => row.text === raw)).toHaveLength(1);
+        expect(rows.find((row) => row.text === unknown)?.capture).toMatchObject({
+          nativeSessionId: "fresh-provider-thread",
+          nativeTurnId: "turn-1",
+          nativeItemId: "future-1",
+        });
+      }),
+    );
+  });
+
+  it("records typed approval IDs and decisions once, then rejects stale responses across reconnect", async () => {
+    await run(
+      Effect.gen(function* () {
+        const { manager, fake, events, start } = yield* setup();
+        const sendApproval = (id: number | string) =>
+          fake.children.at(-1)!.stdout.write(
+            JSON.stringify({
+              id,
+              method: "item/commandExecution/requestApproval",
+              params: {
+                threadId: "fresh-provider-thread",
+                turnId: "turn-1",
+                itemId: "tool-1",
+                command: "synthetic",
+              },
+            }) + "\n",
+          );
+        for (const [id, decision] of [
+          [71, "accept"],
+          ["71", "decline"],
+          ["pending", "cancel"],
+        ] as const) {
+          sendApproval(id);
+          yield* waitFor(
+            () =>
+              events.filter((event) => event.method === "item/commandExecution/requestApproval")
+                .length ===
+              fake.replies.length + 1,
+          );
+          const requestId = events.findLast(
+            (event) => event.method === "item/commandExecution/requestApproval",
+          )!.requestId!;
+          if (decision === "cancel")
+            yield* Effect.promise(() => manager.stopSession(scope.threadId));
+          else
+            yield* Effect.promise(() =>
+              manager.respondToRequest(scope.threadId, requestId, decision),
+            );
+          expect(fake.replies.at(-1)).toEqual({ id, result: { decision } });
+        }
+        const staleRequest = events.findLast(
+          (event) => event.method === "item/commandExecution/requestApproval",
+        )!.requestId!;
+        const oldChild = fake.children[0]!;
+        yield* Effect.promise(() => start("generation-2"));
+        oldChild.stdout.emit(
+          "data",
+          Buffer.from(
+            '{"id":"stale","method":"item/commandExecution/requestApproval","params":{}}\n',
+          ),
+        );
+        yield* Effect.promise(async () => {
+          await expect(
+            manager.respondToRequest(scope.threadId, staleRequest, "accept"),
+          ).rejects.toThrow();
+        });
+        sendApproval(71);
+        yield* waitFor(
+          () =>
+            events.filter((event) => event.method === "item/commandExecution/requestApproval")
+              .length === 4,
+        );
+        yield* Effect.promise(() => manager.stopAll());
+        expect(fake.replies).toEqual([
+          { id: 71, result: { decision: "accept" } },
+          { id: "71", result: { decision: "decline" } },
+          { id: "pending", result: { decision: "cancel" } },
+          { id: 71, result: { decision: "cancel" } },
+        ]);
+        const rows = (yield* contents).filter((row) =>
+          row.capture.payloadType.endsWith(":item/commandExecution/requestApproval"),
+        );
+        expect(rows).toHaveLength(8);
+        const requests = rows.filter((row) => row.capture.direction === "incoming");
+        expect(requests.map((row) => row.capture.nativeEventId)).toEqual([
+          "71",
+          '"71"',
+          '"pending"',
+          "71",
+        ]);
+        expect(new Set(requests.map((row) => row.capture.captureId)).size).toBe(4);
+        expect(requests.map((row) => row.capture.identity.session.lifecycleGeneration)).toEqual([
+          "generation-1",
+          "generation-1",
+          "generation-1",
+          "generation-2",
+        ]);
+        expect(
+          new Set(requests.map((row) => row.capture.identity.session.runtimeSessionId)).size,
+        ).toBe(2);
+        expect((yield* contents).some((row) => row.text?.includes('"stale"'))).toBe(false);
+      }),
+    );
+  });
+
+  it("excludes credential/setup exchanges without losing ordinary quota or token-count events", async () => {
+    await run(
+      Effect.gen(function* () {
+        const { manager, fake, events } = yield* setup({ accountReadError: "ERROR_SECRET" });
+        const frames = [
+          {
+            method: "account/chatgptAuthTokens/refresh",
+            id: "secret-refresh",
+            params: { accessToken: "AUTH_SECRET" },
+          },
+          { method: "future/credential", params: { nested: { api_key: "FIELD_SECRET" } } },
+          {
+            method: "account/rateLimits/updated",
+            params: { rateLimits: { primary: { usedPercent: 25 } } },
+          },
+          {
+            method: "thread/tokenUsage/updated",
+            params: {
+              threadId: "fresh-provider-thread",
+              tokenUsage: { total: { totalTokens: 42 } },
+            },
+          },
+          { method: "future/env", params: { env: { CUSTOM_SERVICE_VALUE: "ENV_SECRET" } } },
+          {
+            method: "future/headers",
+            params: { headers: { Authorization: "HEADER_SECRET", Cookie: "COOKIE_SECRET" } },
+          },
+          { method: "account/login/completed", params: { success: false, error: "cancelled" } },
+          {
+            method: "mcpServer/oauthLogin/completed",
+            params: { name: "synthetic", success: true },
+          },
+        ];
+        fake.children[0]!.stdout.write(
+          frames.map((frame) => JSON.stringify(frame)).join("\n") + "\n",
+        );
+        yield* waitFor(() =>
+          events.some((event) => event.method === "mcpServer/oauthLogin/completed"),
+        );
+        yield* Effect.promise(() => manager.stopAll());
+        const rows = yield* contents;
+        expect(
+          rows.filter((row) => row.capture.disposition === "excluded").length,
+        ).toBeGreaterThanOrEqual(5);
+        expect(JSON.stringify(rows)).not.toMatch(
+          /AUTH_SECRET|FIELD_SECRET|ENV_SECRET|HEADER_SECRET|COOKIE_SECRET|ERROR_SECRET|secret-refresh/,
+        );
+        expect(JSON.stringify(events)).not.toMatch(
+          /AUTH_SECRET|FIELD_SECRET|ENV_SECRET|HEADER_SECRET|COOKIE_SECRET|ERROR_SECRET/,
+        );
+        expect(
+          events.find((event) => event.method === "account/rateLimits/updated")?.payload,
+        ).toEqual(frames[2]!.params);
+        expect(rows.some((row) => row.text === JSON.stringify(frames[3]))).toBe(true);
+        expect(rows.some((row) => row.text === JSON.stringify(frames[6]))).toBe(true);
+        expect(
+          events.find((event) => event.method === "mcpServer/oauthLogin/completed")?.payload,
+        ).toEqual(frames[7]!.params);
+      }),
+    );
+  });
+
+  it("pauses stdout until SQLite commits and drains accepted frames before EOF failure", async () => {
+    await run(
+      Effect.gen(function* () {
+        const { fake, events, sql } = yield* setup();
+        const acquired = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const lock = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* Deferred.succeed(acquired, undefined);
+              yield* Deferred.await(release);
+            }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(acquired);
+        const raw = '{"method":"future/final","params":{"opaque":"final"}}';
+        fake.children[0]!.stdout.write(raw + "\n");
+        fake.children[0]!.stdout.emit("end");
+        expect(fake.children[0]!.stdout.isPaused()).toBe(true);
+        expect(events.some((event) => event.method === "future/final")).toBe(false);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(lock);
+        yield* waitFor(() => events.some((event) => event.method === "protocol/transportError"));
+        expect(events.findIndex((event) => event.method === "future/final")).toBeLessThan(
+          events.findIndex((event) => event.method === "protocol/transportError"),
+        );
+        expect((yield* contents).filter((row) => row.text === raw)).toHaveLength(1);
+      }),
+    );
+  });
+
+  it("stops on a real archive write failure, suppresses publication and allows a fresh lifecycle", async () => {
+    await run(
+      Effect.gen(function* () {
+        const { manager, fake, events, sql, start } = yield* setup();
+        yield* sql`CREATE TRIGGER reject_capture BEFORE INSERT ON native_captures BEGIN SELECT RAISE(ABORT, 'SECRET_DATABASE_ERROR'); END`;
+        fake.children[0]!.stdout.write(
+          '{"method":"future/lost","params":{"body":"PRIVATE_CONTENT"}}\n',
+        );
+        yield* waitFor(() => events.some((event) => event.method === "protocol/transportError"));
+        yield* Effect.promise(() => manager.stopAll());
+        expect(events.some((event) => event.method === "future/lost")).toBe(false);
+        expect(JSON.stringify(events)).not.toMatch(/SECRET_DATABASE_ERROR|PRIVATE_CONTENT/);
+        yield* sql`DROP TRIGGER reject_capture`;
+        yield* Effect.promise(() => start("recovered"));
+        fake.children.at(-1)!.stdout.write('{"method":"future/recovered","params":{}}\n');
+        yield* waitFor(() => events.some((event) => event.method === "future/recovered"));
+        yield* Effect.promise(() => manager.stopAll());
+        expect(
+          (yield* captures).filter((row) => row.payloadType === "incoming:future/recovered"),
+        ).toHaveLength(1);
+      }),
+    );
+  });
+
+  it("archives an accepted approval during stop without dispatching it into a replacement session", async () => {
+    await run(
+      Effect.gen(function* () {
+        const { manager, fake, events, sql, start } = yield* setup();
+        const acquired = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const lock = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* Deferred.succeed(acquired, undefined);
+              yield* Deferred.await(release);
+            }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(acquired);
+        const raw =
+          '{"id":"late","method":"item/commandExecution/requestApproval","params":{"command":"synthetic"}}';
+        fake.children[0]!.stdout.write(raw + "\n");
+        const stopping = manager.stopSession(scope.threadId);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(lock);
+        yield* Effect.promise(() => stopping);
+        yield* Effect.promise(() => start("replacement"));
+        expect(
+          events.some((event) => event.method === "item/commandExecution/requestApproval"),
+        ).toBe(false);
+        expect(fake.replies).toEqual([]);
+        expect((yield* contents).filter((row) => row.text === raw)).toHaveLength(1);
+      }),
+    );
+  });
+
+  it("fails closed on a burst beyond the capture queue without publishing uncaptured events", async () => {
+    await run(
+      Effect.gen(function* () {
+        const { manager, fake, events } = yield* setup();
+        fake.children[0]!.stdout.write(
+          Array.from({ length: 257 }, (_, ordinal) =>
+            JSON.stringify({ method: "future/burst", params: { ordinal } }),
+          ).join("\n") + "\n",
+        );
+        yield* waitFor(() => events.some((event) => event.method === "protocol/transportError"));
+        yield* Effect.promise(() => manager.stopAll());
+        expect(events.some((event) => event.method === "future/burst")).toBe(false);
+        expect((yield* captures).some((row) => row.payloadType === "incoming:future/burst")).toBe(
+          false,
+        );
+      }),
+    );
+  });
+
+  it("bounds shutdown when SQLite remains blocked and never publishes the timed-out frame", async () => {
+    await run(
+      Effect.gen(function* () {
+        const { manager, fake, events, sql } = yield* setup();
+        const acquired = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const lock = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* Deferred.succeed(acquired, undefined);
+              yield* Deferred.await(release);
+            }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(acquired);
+        fake.children[0]!.stdout.write('{"method":"future/timeout","params":{}}\n');
+        yield* waitFor(
+          () => events.some((event) => event.method === "protocol/transportError"),
+          6500,
+        );
+        // The replacement barrier must settle even while the database is still blocked.
+        yield* Effect.promise(() => manager.stopAll()).pipe(Effect.timeout("1 second"));
+        expect(events.some((event) => event.method === "future/timeout")).toBe(false);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(lock);
+        expect((yield* captures).some((row) => row.payloadType === "incoming:future/timeout")).toBe(
+          false,
+        );
+      }),
+    );
+  }, 10_000);
+
+  it("resumes partial stdout after capture before waiting for a backpressured stdin write", async () => {
+    await run(
+      Effect.gen(function* () {
+        const { manager, fake, events, sql } = yield* setup();
+        const acquired = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const lock = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* Deferred.succeed(acquired, undefined);
+              yield* Deferred.await(release);
+            }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(acquired);
+        const child = fake.children[0]!;
+        child.stdin.pause();
+        const turn = manager
+          .sendTurn({ threadId: scope.threadId, input: "x".repeat(200_000) })
+          .catch(() => undefined);
+        child.stdout.write('{"method":"future/drain","params":{}');
+        expect(child.stdout.isPaused()).toBe(true);
+        // A child can be unable to consume stdin until its own stdout drains.
+        child.stdout.once("resume", () => {
+          child.stdout.write("}\n");
+          child.stdin.resume();
+        });
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(lock);
+        const result = yield* Effect.promise(() => turn).pipe(Effect.timeout("1 second"));
+        expect(result?.turnId).toBe("synthetic-turn-1");
+        yield* waitFor(() => events.some((event) => event.method === "future/drain"));
+        const rows = yield* contents;
+        expect(
+          rows.filter((row) => row.capture.payloadType === "outgoing:turn/start"),
+        ).toHaveLength(1);
+        expect(rows.some((row) => row.text === '{"method":"future/drain","params":{}}')).toBe(true);
+      }),
+    );
+  });
+});
 
 const fullAccessTurnOverrides = {
   approvalPolicy: "never",

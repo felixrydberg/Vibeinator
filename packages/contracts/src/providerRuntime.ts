@@ -17,6 +17,7 @@ import {
 import { ClaudeCacheObservation } from "./claudeCache";
 import { ProviderUsageLimit } from "./usageLimit";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance";
+import { NativeCaptureId } from "./durableInformation";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const UnknownRecordSchema = Schema.Record(Schema.String, Schema.Unknown);
@@ -265,6 +266,7 @@ const RuntimeErrorType = Schema.Literal("runtime.error");
 const EventUnmappedType = Schema.Literal("event.unmapped");
 
 const ProviderRuntimeEventBase = Schema.Struct({
+  nativeCaptureId: Schema.optional(NativeCaptureId),
   eventId: EventId,
   provider: ProviderDriverKind,
   providerInstanceId: Schema.optional(ProviderInstanceId),
