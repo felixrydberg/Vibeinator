@@ -38,6 +38,9 @@ jobs:
       - name: Full unit suite on Linux
         if: runner.os == 'Linux'
         run: bun run test
+      - name: Codex capture boundary on Windows
+        if: runner.os == 'Windows'
+        run: bun run --cwd apps/server test src/codexAppServerManager.test.ts -t 'Codex durable native capture'
       # The inherited full suite includes Unix sockets and POSIX path/mode fixtures.
       # Keep the Windows adoption checks explicit; remaining qualification is VIB-001.
       - name: Windows contracts

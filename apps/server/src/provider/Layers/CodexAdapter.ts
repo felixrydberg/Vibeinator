@@ -110,6 +110,7 @@ import {
   sanitizeUnmappedProviderNativeType,
 } from "../unmappedProviderEvents.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import type { CodexNativeCaptureFactory } from "../codexNativeCapture.ts";
 
 const PROVIDER = "codex" as const;
 const CODEX_RUNTIME_WARNING_METHODS = new Set(["guardianWarning", "warning"]);
@@ -177,6 +178,7 @@ function compactCodexNativeEventForIngress(event: ProviderEvent): {
 }
 
 export interface CodexAdapterLiveOptions {
+  readonly nativeCapture?: CodexNativeCaptureFactory;
   readonly manager?: CodexAppServerManager;
   readonly makeManager?: (services?: ServiceMap.ServiceMap<never>) => CodexAppServerManager;
   readonly nativeEventLogPath?: string;
@@ -868,6 +870,7 @@ function runtimeEventBase(
 ): Omit<ProviderRuntimeEvent, "type" | "payload"> {
   const refs = providerRefsFromEvent(event);
   return {
+    ...(event.nativeCaptureId ? { nativeCaptureId: event.nativeCaptureId } : {}),
     eventId: event.id,
     provider: event.provider,
     threadId: canonicalThreadId,
@@ -2133,6 +2136,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         return (
           options?.makeManager?.(services) ??
           new CodexAppServerManager(services, {
+            ...(options?.nativeCapture ? { nativeCapture: options.nativeCapture } : {}),
             synaraSkillsDir: synaraSkillsDir(serverConfig.baseDir),
             ...(agentGatewayCredentials
               ? {
