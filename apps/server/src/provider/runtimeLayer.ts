@@ -29,6 +29,7 @@ import { ProviderSessionRuntimeRepositoryLive } from "../persistence/Layers/Prov
 import { ProviderRuntimeEventRepositoryLive } from "../persistence/Layers/ProviderRuntimeEvents";
 import { NativeArchiveRepositoryLive } from "../persistence/Layers/NativeArchive";
 import { makeCodexNativeCapture } from "./codexNativeCapture";
+import { makeClaudeNativeCapture } from "./claudeNativeCapture";
 
 export function makeServerProviderLayer(
   options: {
@@ -63,9 +64,11 @@ export function makeServerProviderLayer(
       nativeCapture,
       ...(nativeEventLogger ? { nativeEventLogger } : {}),
     }).pipe(Layer.provide(agentGatewayCredentialsLayer));
-    const claudeAdapterLayer = makeClaudeAdapterLive(
-      nativeEventLogger ? { nativeEventLogger } : undefined,
-    ).pipe(Layer.provide(agentGatewayCredentialsLayer));
+    const claudeNativeCapture = yield* makeClaudeNativeCapture;
+    const claudeAdapterLayer = makeClaudeAdapterLive({
+      nativeCapture: claudeNativeCapture,
+      ...(nativeEventLogger ? { nativeEventLogger } : {}),
+    }).pipe(Layer.provide(agentGatewayCredentialsLayer));
     const openCodeAdapterLayer = makeOpenCodeAdapterLive({
       ...(nativeEventLogger ? { nativeEventLogger } : {}),
       resolveServerPassword: resolveProviderServerPassword,
