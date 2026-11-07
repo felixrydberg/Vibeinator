@@ -21,7 +21,17 @@ import {
   ProviderRuntimeEvent,
   ThreadId,
   TurnId,
+  ProjectId,
 } from "@synara/contracts";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as NodeSqliteClient from "../../persistence/NodeSqliteClient.ts";
+import { runMigrations } from "../../persistence/Migrations.ts";
+import { NativeArchiveRepository } from "../../persistence/Services/NativeArchive.ts";
+import { NativeArchiveRepositoryLive } from "../../persistence/Layers/NativeArchive.ts";
+import {
+  makeClaudeNativeCapture,
+  type ClaudeNativeCaptureFactory,
+} from "../claudeNativeCapture.ts";
 import { assert, describe, it } from "@effect/vitest";
 import { assessClaudeCache } from "@synara/shared/claudeCache";
 import {
@@ -491,6 +501,7 @@ function makeHarness(config?: {
 }
 
 function makeMultiQueryHarness(config?: {
+  readonly nativeCapture?: ClaudeNativeCaptureFactory;
   readonly baseDir?: string;
   readonly failCreateAt?: number;
   readonly gatewayCredentials?: AgentGatewayCredentialsShape;
@@ -502,6 +513,7 @@ function makeMultiQueryHarness(config?: {
     readonly options: ClaudeQueryOptions;
   }> = [];
   let layer = makeClaudeAdapterLive({
+    ...(config?.nativeCapture ? { nativeCapture: config.nativeCapture } : {}),
     createQuery: (input) => {
       if (queries.length === config?.failCreateAt) {
         throw new Error("simulated Claude spawn failure");
@@ -529,6 +541,657 @@ function makeMultiQueryHarness(config?: {
 
   return { layer, queries, createInputs };
 }
+
+const permissionOptions = (id: string, signal = new AbortController().signal) => ({
+  toolUseID: id,
+  requestId: `request-${id}`,
+  signal,
+});
+
+describe("Claude durable native capture", () => {
+  const scope = {
+    projectId: ProjectId.makeUnsafe("capture-project"),
+    threadId: ThreadId.makeUnsafe("capture-claude"),
+  };
+  type Harness = ReturnType<typeof makeMultiQueryHarness>;
+  const run = async <E>(
+    program: (
+      harness: Harness,
+      root: string,
+    ) => Effect.Effect<
+      void,
+      E,
+      ClaudeAdapter | NativeArchiveRepository | SqlClient.SqlClient | import("effect").Scope.Scope
+    >,
+  ) => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "vibeinator-claude-capture-"));
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          yield* runMigrations();
+          const sql = yield* SqlClient.SqlClient;
+          const timestamp = "2026-11-07T00:00:00.000Z";
+          yield* sql`INSERT INTO projection_projects(project_id, title, workspace_root, scripts_json, created_at, updated_at)
+          VALUES (${scope.projectId}, 'Synthetic', ${root}, '[]', ${timestamp}, ${timestamp})`;
+          yield* sql`INSERT INTO projection_threads(thread_id, project_id, title, created_at, updated_at)
+          VALUES (${scope.threadId}, ${scope.projectId}, 'Synthetic', ${timestamp}, ${timestamp})`;
+          const nativeCapture = yield* makeClaudeNativeCapture;
+          const harness = makeMultiQueryHarness({ baseDir: root, nativeCapture });
+          yield* program(harness, root).pipe(Effect.provide(harness.layer));
+        }).pipe(
+          Effect.provide(NativeArchiveRepositoryLive),
+          Effect.provide(NodeSqliteClient.layerMemory()),
+          Effect.scoped,
+        ),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const start = (
+    root: string,
+    generation = "generation-1",
+    runtimeMode: "approval-required" | "full-access" = "approval-required",
+    resumeCursor?: unknown,
+  ) =>
+    Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: scope.threadId,
+        provider: "claudeAgent",
+        runtimeMode,
+        lifecycleGeneration: generation,
+        cwd: root,
+        providerOptions: { claudeAgent: { homePath: root } },
+        ...(resumeCursor ? { resumeCursor } : {}),
+      });
+      return adapter;
+    });
+  const collect = Effect.gen(function* () {
+    const adapter = yield* ClaudeAdapter;
+    const events: ProviderRuntimeEvent[] = [];
+    yield* adapter.streamEvents.pipe(
+      Stream.runForEach((event) =>
+        Effect.sync(() => {
+          events.push(event);
+        }),
+      ),
+      Effect.forkChild,
+    );
+    return events;
+  });
+  const captures = Effect.gen(function* () {
+    const archive = yield* NativeArchiveRepository;
+    return yield* archive.listCaptures({
+      ...scope,
+      afterSequence: 0,
+      throughSequence: yield* archive.getHighWaterSequence(scope),
+      limit: 100,
+    });
+  });
+  const contents = Effect.gen(function* () {
+    const archive = yield* NativeArchiveRepository;
+    return yield* Effect.forEach(yield* captures, (capture) =>
+      Effect.gen(function* () {
+        const text =
+          capture.disposition === "retained"
+            ? Buffer.concat(
+                (yield* Stream.runCollect(
+                  archive.streamPayload({ ...scope, payloadId: capture.payload.payloadId }),
+                )).map((part) => Buffer.from(part)),
+              ).toString("utf8")
+            : undefined;
+        return { capture, text };
+      }),
+    );
+  });
+  const waitFor = (predicate: () => boolean) =>
+    Effect.promise(() => vi.waitFor(() => assert.equal(predicate(), true), { timeout: 3000 }));
+
+  it("retains decoded SDK messages, full tool/image content and unknown types before diagnostic shaping", async () => {
+    await run((harness, root) =>
+      Effect.gen(function* () {
+        const events = yield* collect;
+        const adapter = yield* start(root);
+        yield* adapter.sendTurn({
+          threadId: scope.threadId,
+          input: "synthetic prompt",
+          attachments: [],
+        });
+        const prompt = harness.createInputs[0]!.prompt[Symbol.asyncIterator]();
+        const sent = yield* Effect.promise(() => prompt.next());
+        const toolText = "🙂\0日本語\r\n".repeat(180_000) + "END_SENTINEL";
+        const messages = [
+          {
+            type: "stream_event",
+            uuid: "start",
+            session_id: "native-reused",
+            parent_tool_use_id: null,
+            event: { type: "message_start", message: { id: "message-1" } },
+          },
+          {
+            type: "stream_event",
+            uuid: "block",
+            session_id: "native-reused",
+            parent_tool_use_id: null,
+            event: {
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "text", text: "" },
+            },
+          },
+          {
+            type: "stream_event",
+            uuid: "delta",
+            session_id: "native-reused",
+            parent_tool_use_id: null,
+            event: {
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "text_delta", text: "Hello" },
+            },
+          },
+          {
+            type: "assistant",
+            uuid: "assistant",
+            session_id: "native-reused",
+            parent_tool_use_id: null,
+            message: {
+              id: "message-1",
+              role: "assistant",
+              content: [
+                { type: "text", text: "Hello" },
+                { type: "tool_use", id: "tool-1", name: "Bash", input: { command: "synthetic" } },
+              ],
+            },
+          },
+          {
+            type: "user",
+            uuid: "tool-result",
+            session_id: "native-reused",
+            parent_tool_use_id: null,
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "tool-1",
+                  content: [
+                    { type: "text", text: toolText },
+                    {
+                      type: "image",
+                      source: {
+                        type: "base64",
+                        media_type: "image/png",
+                        data: "SYNTHETIC_INLINE_IMAGE",
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+          {
+            type: "future_event",
+            uuid: "future",
+            session_id: "native-reused",
+            opaque: { value: "unknown\0日本語" },
+          },
+        ];
+        for (const message of messages) harness.queries[0]!.emit(message as unknown as SDKMessage);
+        yield* waitFor(() =>
+          events.some(
+            (event) =>
+              event.type === "runtime.warning" && JSON.stringify(event).includes("future_event"),
+          ),
+        );
+        const rows = yield* contents;
+        for (const message of messages)
+          assert.equal(rows.filter((row) => row.text === JSON.stringify(message)).length, 1);
+        assert.equal(
+          rows.some((row) => row.text === JSON.stringify(sent.value)),
+          true,
+        );
+        const deltas = events.filter(
+          (event) =>
+            event.type === "content.delta" && event.payload.streamKind === "assistant_text",
+        );
+        assert.equal(
+          deltas
+            .map((event) => (event.type === "content.delta" ? event.payload.delta : ""))
+            .join(""),
+          "Hello",
+        );
+        assert.equal(JSON.stringify(events).includes("SYNTHETIC_INLINE_IMAGE"), false);
+        const deltaCapture = rows.find((row) => row.capture.nativeEventId === "delta")!;
+        assert.equal(deltas[0]?.nativeCaptureId, deltaCapture.capture.captureId);
+        assert.equal(
+          rows.find((row) => row.capture.nativeEventId === "tool-result")?.capture.nativeItemId,
+          "tool-1",
+        );
+        yield* adapter.stopSession(scope.threadId);
+        yield* Effect.promise(async () => {
+          await prompt.return?.();
+        });
+      }),
+    );
+  });
+
+  it("captures approval decisions, question answers and native replies once without changing permissions", async () => {
+    await run((harness, root) =>
+      Effect.gen(function* () {
+        const events = yield* collect;
+        const adapter = yield* start(root);
+        yield* adapter.sendTurn({ threadId: scope.threadId, input: "synthetic", attachments: [] });
+        const canUseTool = harness.createInputs[0]!.options.canUseTool!;
+        for (const [id, decision, behavior] of [
+          ["approve", "accept", "allow"],
+          ["deny", "decline", "deny"],
+        ] as const) {
+          const result = canUseTool("Bash", { command: "synthetic" }, permissionOptions(id));
+          yield* waitFor(() =>
+            events.some(
+              (event) =>
+                event.type === "request.opened" && event.providerRefs?.providerItemId === id,
+            ),
+          );
+          const request = events.find(
+            (event) => event.type === "request.opened" && event.providerRefs?.providerItemId === id,
+          )!;
+          yield* adapter.respondToRequest(
+            scope.threadId,
+            ApprovalRequestId.makeUnsafe(request.requestId!),
+            decision,
+          );
+          assert.equal((yield* Effect.promise(() => result))?.behavior, behavior);
+        }
+        const input = {
+          questions: [
+            {
+              question: "Which option?",
+              header: "Choice",
+              options: [{ label: "A", description: "First" }],
+              multiSelect: false,
+            },
+          ],
+        };
+        const answer = canUseTool("AskUserQuestion", input, permissionOptions("question"));
+        yield* waitFor(() => events.some((event) => event.type === "user-input.requested"));
+        const request = events.find((event) => event.type === "user-input.requested")!;
+        yield* adapter.respondToUserInput(
+          scope.threadId,
+          ApprovalRequestId.makeUnsafe(request.requestId!),
+          { Choice: "A" },
+        );
+        assert.deepEqual(yield* Effect.promise(() => answer), {
+          behavior: "allow",
+          updatedInput: { ...input, answers: { "Which option?": "A" } },
+        });
+        const rows = yield* contents;
+        assert.equal(
+          rows.filter((row) => row.capture.payloadType === "incoming:canUseTool/request").length,
+          3,
+        );
+        assert.equal(
+          rows.filter((row) => row.capture.payloadType === "outgoing:canUseTool/response").length,
+          3,
+        );
+        assert.equal(
+          rows.filter((row) => row.capture.payloadType === "outgoing:canUseTool/decision").length,
+          2,
+        );
+        assert.equal(
+          rows.filter(
+            (row) => row.capture.payloadType === "outgoing:canUseTool/AskUserQuestion/resolved",
+          ).length,
+          1,
+        );
+        for (const event of events.filter(
+          (event) => event.type === "request.resolved" || event.type === "user-input.resolved",
+        ))
+          assert.equal(
+            rows.some((row) => row.capture.captureId === event.nativeCaptureId),
+            true,
+          );
+      }),
+    );
+  });
+
+  it("retains cancellation and reused native IDs across runtime replacement without answering stale requests", async () => {
+    await run((harness, root) =>
+      Effect.gen(function* () {
+        const events = yield* collect;
+        const adapter = yield* start(root);
+        const oldQuery = harness.queries[0]!;
+        const oldCallback = harness.createInputs[0]!.options.canUseTool!;
+        const controller = new AbortController();
+        const pending = oldCallback(
+          "Bash",
+          { command: "synthetic" },
+          permissionOptions("reused-tool", controller.signal),
+        );
+        yield* waitFor(() => events.some((event) => event.type === "request.opened"));
+        const staleId = events.find((event) => event.type === "request.opened")!.requestId!;
+        controller.abort();
+        assert.equal((yield* Effect.promise(() => pending))?.behavior, "deny");
+        oldQuery.emit({
+          type: "stream_event",
+          uuid: "resume-start",
+          session_id: "11111111-1111-4111-8111-111111111111",
+          parent_tool_use_id: null,
+          event: { type: "message_start", message: { id: "resumable-message" } },
+        } as unknown as SDKMessage);
+        yield* waitFor(() => events.some((event) => event.type === "thread.started"));
+        const raw = {
+          type: "future_event",
+          uuid: "reused",
+          session_id: "11111111-1111-4111-8111-111111111111",
+          body: "first",
+        };
+        oldQuery.emit(raw as unknown as SDKMessage);
+        yield* waitFor(() =>
+          events.some(
+            (event) =>
+              event.type === "runtime.warning" && JSON.stringify(event).includes("future_event"),
+          ),
+        );
+        const resumeCursor = (yield* adapter.listSessions())[0]?.resumeCursor;
+        yield* adapter.stopSession(scope.threadId);
+        yield* start(root, "generation-2", "full-access", resumeCursor);
+        assert.equal(
+          harness.createInputs[1]!.options.resume,
+          "11111111-1111-4111-8111-111111111111",
+        );
+        const before = events.filter((event) => event.type === "request.opened").length;
+        assert.equal(
+          (yield* Effect.promise(() => oldCallback("Bash", {}, permissionOptions("stale"))))
+            ?.behavior,
+          "deny",
+        );
+        assert.equal(events.filter((event) => event.type === "request.opened").length, before);
+        const stale = yield* adapter
+          .respondToRequest(scope.threadId, ApprovalRequestId.makeUnsafe(staleId), "accept")
+          .pipe(Effect.result);
+        assert.equal(stale._tag, "Failure");
+        const freshCallback = harness.createInputs[1]!.options.canUseTool!;
+        assert.equal(
+          (yield* Effect.promise(() =>
+            freshCallback("Bash", { command: "synthetic" }, permissionOptions("reused-tool")),
+          ))?.behavior,
+          "allow",
+        );
+        harness.queries[1]!.emit({ ...raw, body: "second" } as unknown as SDKMessage);
+        yield* waitFor(
+          () =>
+            events.filter(
+              (event) =>
+                event.type === "runtime.warning" && JSON.stringify(event).includes("future_event"),
+            ).length === 2,
+        );
+        const rows = (yield* captures).filter((row) => row.nativeEventId === "reused");
+        assert.equal(rows.length, 2);
+        assert.equal(new Set(rows.map((row) => row.identity.session.runtimeSessionId)).size, 2);
+        assert.deepEqual(
+          rows.map((row) => row.identity.session.lifecycleGeneration),
+          ["generation-1", "generation-2"],
+        );
+        assert.equal(
+          (yield* contents).some((row) => row.text?.includes('"stale"')),
+          false,
+        );
+      }),
+    );
+  });
+
+  it("excludes auth and credential envelopes while preserving benign status and token counts", async () => {
+    await run((harness, root) =>
+      Effect.gen(function* () {
+        const events = yield* collect;
+        const adapter = yield* start(root);
+        const frames = [
+          {
+            type: "auth_status",
+            session_id: "native",
+            uuid: "auth",
+            isAuthenticating: true,
+            output: ["AUTH_SECRET"],
+            error: "LOGIN_SECRET",
+          },
+          {
+            type: "future_event",
+            session_id: "native",
+            uuid: "secret",
+            fields: {
+              apiKey: "KEY_SECRET",
+              headers: { Authorization: "HEADER_SECRET" },
+              env: { CUSTOM: "ENV_SECRET" },
+            },
+          },
+          {
+            type: "auth_status",
+            session_id: "native",
+            uuid: "status",
+            isAuthenticating: false,
+            output: [],
+          },
+          {
+            type: "future_usage",
+            session_id: "native",
+            uuid: "usage",
+            tokens: 123,
+            usage: { input_tokens: 3, output_tokens: 5 },
+          },
+        ];
+        for (const frame of frames) harness.queries[0]!.emit(frame as unknown as SDKMessage);
+        yield* waitFor(() =>
+          events.some((event) => JSON.stringify(event).includes('"tokens":123')),
+        );
+        const toolInput = { command: "synthetic", apiKey: "CALLBACK_SECRET" };
+        const permission = harness.createInputs[0]!.options.canUseTool!(
+          "Bash",
+          toolInput,
+          permissionOptions("credential-tool"),
+        );
+        yield* waitFor(() => events.some((event) => event.type === "request.opened"));
+        const request = events.find((event) => event.type === "request.opened")!;
+        yield* adapter.respondToRequest(
+          scope.threadId,
+          ApprovalRequestId.makeUnsafe(request.requestId!),
+          "accept",
+        );
+        assert.deepEqual(yield* Effect.promise(() => permission), {
+          behavior: "allow",
+          updatedInput: toolInput,
+        });
+        const rows = yield* contents;
+        assert.equal(rows.filter((row) => row.capture.disposition === "excluded").length, 5);
+        assert.notMatch(
+          JSON.stringify(rows),
+          /AUTH_SECRET|LOGIN_SECRET|KEY_SECRET|HEADER_SECRET|ENV_SECRET|CALLBACK_SECRET/,
+        );
+        assert.notMatch(
+          JSON.stringify(events),
+          /AUTH_SECRET|LOGIN_SECRET|KEY_SECRET|HEADER_SECRET|ENV_SECRET|CALLBACK_SECRET/,
+        );
+        assert.equal(
+          rows.some((row) => row.text === JSON.stringify(frames[2])),
+          true,
+        );
+        assert.equal(
+          rows.some((row) => row.text === JSON.stringify(frames[3])),
+          true,
+        );
+        assert.equal(
+          events.some(
+            (event) => event.type === "auth.status" && event.payload.isAuthenticating === false,
+          ),
+          true,
+        );
+      }),
+    );
+  });
+
+  it("withholds display under SQLite backpressure and drains accepted data during stop", async () => {
+    await run((harness, root) =>
+      Effect.gen(function* () {
+        const events = yield* collect;
+        const adapter = yield* start(root);
+        const sql = yield* SqlClient.SqlClient;
+        const acquired = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const lock = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* Deferred.succeed(acquired, undefined);
+              yield* Deferred.await(release);
+            }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(acquired);
+        const raw = {
+          type: "future_event",
+          uuid: "held",
+          session_id: "native",
+          body: "accepted before stop",
+        };
+        harness.queries[0]!.emit(raw as unknown as SDKMessage);
+        yield* Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
+        assert.equal(
+          events.some((event) => JSON.stringify(event).includes("accepted before stop")),
+          false,
+        );
+        const stopping = yield* adapter.stopSession(scope.threadId).pipe(Effect.forkChild);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(lock);
+        yield* Fiber.join(stopping);
+        assert.equal(
+          events.some((event) => JSON.stringify(event).includes("accepted before stop")),
+          false,
+        );
+        assert.equal((yield* contents).filter((row) => row.text === JSON.stringify(raw)).length, 1);
+      }),
+    );
+  });
+
+  it.each(["request", "decision", "stream", "prompt"] as const)(
+    "denies permission and stops on archive failure at %s without leaking the SQL cause",
+    async (boundary) => {
+      await run((harness, root) =>
+        Effect.gen(function* () {
+          const events = yield* collect;
+          const adapter = yield* start(root);
+          const sql = yield* SqlClient.SqlClient;
+          const rejectCapture = sql`CREATE TRIGGER reject_capture BEFORE INSERT ON native_captures BEGIN SELECT RAISE(ABORT, 'SECRET_DATABASE_ERROR'); END`;
+          if (boundary !== "decision") yield* rejectCapture;
+          const permission =
+            boundary === "stream" || boundary === "prompt"
+              ? undefined
+              : harness.createInputs[0]!.options.canUseTool!(
+                  "Bash",
+                  { command: "PRIVATE_CONTENT" },
+                  permissionOptions("failed"),
+                );
+          if (boundary === "decision") {
+            yield* waitFor(() => events.some((event) => event.type === "request.opened"));
+            yield* rejectCapture;
+            const request = events.find((event) => event.type === "request.opened")!;
+            const outcome = yield* adapter
+              .respondToRequest(
+                scope.threadId,
+                ApprovalRequestId.makeUnsafe(request.requestId!),
+                "accept",
+              )
+              .pipe(Effect.result);
+            assert.equal(outcome._tag, "Failure");
+          }
+          if (boundary === "stream")
+            harness.queries[0]!.emit({
+              type: "future_event",
+              uuid: "failed",
+              session_id: "native",
+              body: "PRIVATE_CONTENT",
+            } as unknown as SDKMessage);
+          if (boundary === "prompt") {
+            yield* adapter.sendTurn({
+              threadId: scope.threadId,
+              input: "PRIVATE_CONTENT",
+              attachments: [],
+            });
+            const iterator = harness.createInputs[0]!.prompt[Symbol.asyncIterator]();
+            const result = yield* Effect.tryPromise(() => iterator.next()).pipe(Effect.result);
+            assert.equal(result._tag, "Failure");
+          }
+          if (permission) assert.equal((yield* Effect.promise(() => permission))?.behavior, "deny");
+          yield* waitFor(() => events.some((event) => event.type === "session.exited"));
+          assert.equal(yield* adapter.hasSession(scope.threadId), false);
+          assert.equal(
+            events.filter((event) => event.type === "request.opened").length,
+            boundary === "decision" ? 1 : 0,
+          );
+          assert.notMatch(
+            JSON.stringify(events.filter((event) => event.type !== "request.opened")),
+            /SECRET_DATABASE_ERROR|PRIVATE_CONTENT/,
+          );
+          yield* sql`DROP TRIGGER reject_capture`;
+          yield* start(root, "recovered");
+          assert.equal(yield* adapter.hasSession(scope.threadId), true);
+        }),
+      );
+    },
+  );
+  it.each(["cyclic", "sparse-array", "non-finite"] as const)(
+    "fails closed for unsupported SDK JSON (%s)",
+    async (kind) => {
+      await run((harness, root) =>
+        Effect.gen(function* () {
+          const events = yield* collect;
+          const adapter = yield* start(root);
+          const cycle: Record<string, unknown> = {};
+          cycle.self = cycle;
+          const payload =
+            kind === "cyclic" ? cycle : kind === "sparse-array" ? Array(1) : Number.NaN;
+          harness.queries[0]!.emit({
+            type: "future_event",
+            uuid: "invalid",
+            session_id: "native",
+            payload,
+          } as unknown as SDKMessage);
+          yield* waitFor(() => events.some((event) => event.type === "session.exited"));
+          assert.equal(yield* adapter.hasSession(scope.threadId), false);
+          assert.equal(
+            (yield* captures).some((capture) => capture.nativeEventId === "invalid"),
+            false,
+          );
+          assert.equal(
+            events.some((event) => JSON.stringify(event).includes("future_event")),
+            false,
+          );
+        }),
+      );
+    },
+  );
+  it("applies the byte admission limit to credential-excluded SDK frames too", async () => {
+    await run((harness, root) =>
+      Effect.gen(function* () {
+        const events = yield* collect;
+        const adapter = yield* start(root);
+        harness.queries[0]!.emit({
+          type: "future_event",
+          uuid: "oversized",
+          session_id: "native",
+          apiKey: "x".repeat(32 * 1024 * 1024 + 1),
+        } as unknown as SDKMessage);
+        yield* waitFor(() => events.some((event) => event.type === "session.exited"));
+        assert.equal(yield* adapter.hasSession(scope.threadId), false);
+        assert.equal((yield* captures).length, 1);
+        assert.equal(
+          events.some((event) => JSON.stringify(event).includes("future_event")),
+          false,
+        );
+      }),
+    );
+  });
+});
 
 function makeGatewayCredentialsHarness(options?: {
   readonly cancelSessionTurnRequests?: (token: string, turnId: string) => Promise<void>;

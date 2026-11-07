@@ -43,6 +43,7 @@ import {
   type CanonicalItemType,
   type ClaudeApiEffort,
   type ModelCapabilities,
+  type NativeCaptureId,
   type EffortOption,
   ClaudeCacheObservation,
   type CanonicalRequestType,
@@ -202,6 +203,13 @@ import {
 import { extractProposedPlanMarkdown, withProviderPlanModePrompt } from "../planMode.ts";
 import { ClaudeAdapter, type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import { NativeCaptureOrigin } from "../nativeCapture.ts";
+import {
+  claudePublishedPayload,
+  type ClaudeCaptureFrame,
+  type ClaudeNativeCaptureFactory,
+  type ClaudeNativeCaptureLane,
+} from "../claudeNativeCapture.ts";
 import {
   teardownChildProcessTree,
   teardownProviderProcessTree,
@@ -414,6 +422,8 @@ interface ClaudeSubagentRun {
 type ClaudeTokenUsageState = "current" | "skip-compaction-call" | "awaiting-fresh-assistant";
 
 interface ClaudeSessionContext {
+  readonly nativeCapture?: ClaudeNativeCaptureLane;
+  nativeCaptureFailure?: Error;
   resultUsageBaseline?: ClaudeResultUsageBaseline;
   // Claude Code restores a resumed session's saved usage totals into the first
   // result of a new process. Until a baseline exists, a result is not one turn.
@@ -736,6 +746,7 @@ async function readInstalledClaudeCliVersion(input: {
 }
 
 export interface ClaudeAdapterLiveOptions {
+  readonly nativeCapture?: ClaudeNativeCaptureFactory;
   // Async because the default implementation lazily imports the Claude Agent
   // SDK; test doubles may still return a runtime synchronously.
   readonly createQuery?: (input: {
@@ -2459,6 +2470,29 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
     const readClaudeCliVersion = options?.readClaudeCliVersion ?? readInstalledClaudeCliVersion;
 
     const sessions = new Map<ThreadId, ClaudeSessionContext>();
+    const captureNative = (
+      context: ClaudeSessionContext,
+      frame: ClaudeCaptureFrame,
+    ): Effect.Effect<NativeCaptureId | undefined, Error> =>
+      context.nativeCapture
+        ? Effect.tryPromise({
+            try: () => context.nativeCapture!.record(frame),
+            catch: () => new Error("Claude native capture failed; recording stopped."),
+          }).pipe(
+            Effect.tapError((error) =>
+              Effect.gen(function* () {
+                if (context.nativeCaptureFailure) return;
+                context.nativeCaptureFailure = error;
+                yield* handleStreamExit(context, Exit.fail(error)).pipe(
+                  Effect.catch((cause) =>
+                    Effect.logError("Claude capture failure teardown failed", { cause }),
+                  ),
+                  Effect.forkIn(adapterScope),
+                );
+              }),
+            ),
+          )
+        : Effect.succeed(undefined);
     const failedStartupProcessOwners = new Map<ThreadId, ClaudeProcessOwner>();
     const failedDiscoveryProcessOwners = new Set<ClaudeProcessOwner>();
     const sessionLifecycleLock = makeKeyedLock<ThreadId>();
@@ -2632,15 +2666,23 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
       context: ClaudeSessionContext,
       event: ProviderRuntimeEvent,
     ): Effect.Effect<void> =>
-      Queue.offer(runtimeEventQueue, {
-        ...(stripDiagnosticImages(event) as ProviderRuntimeEvent),
-        ...(event.providerInstanceId === undefined && context.session.providerInstanceId
-          ? { providerInstanceId: context.session.providerInstanceId }
-          : {}),
-        ...(context.lifecycleGeneration !== undefined
-          ? { lifecycleGeneration: context.lifecycleGeneration }
-          : {}),
-      }).pipe(Effect.asVoid);
+      Effect.gen(function* () {
+        const origin = yield* Effect.serviceOption(NativeCaptureOrigin);
+        yield* Queue.offer(runtimeEventQueue, {
+          ...(stripDiagnosticImages(
+            claudePublishedPayload("runtime", event),
+          ) as ProviderRuntimeEvent),
+          ...(event.nativeCaptureId === undefined && Option.isSome(origin)
+            ? { nativeCaptureId: origin.value }
+            : {}),
+          ...(event.providerInstanceId === undefined && context.session.providerInstanceId
+            ? { providerInstanceId: context.session.providerInstanceId }
+            : {}),
+          ...(context.lifecycleGeneration !== undefined
+            ? { lifecycleGeneration: context.lifecycleGeneration }
+            : {}),
+        });
+      });
 
     const logNativeSdkMessage = (
       context: ClaudeSessionContext,
@@ -2671,7 +2713,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                 : {}),
               ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
               ...(itemId ? { itemId: ProviderItemId.makeUnsafe(itemId) } : {}),
-              payload: message,
+              payload: claudePublishedPayload(sdkNativeMethod(message), message),
             },
           },
           context.session.threadId,
@@ -3376,9 +3418,20 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             return yield* Deferred.await(pending.settled);
           }
 
+          const captureId = context.nativeCaptureFailure
+            ? undefined
+            : yield* captureNative(context, {
+                method: "canUseTool/decision",
+                direction: "outgoing",
+                nativeSessionId: context.resumeSessionId,
+                nativeItemId: pending.providerItemId,
+                payload: { requestId, decision },
+              }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+          if (context.nativeCaptureFailure) decision = "cancel";
           const stamp = yield* makeEventStamp();
           yield* offerRuntimeEvent(context, {
             type: "request.resolved",
+            ...(captureId ? { nativeCaptureId: captureId } : {}),
             eventId: stamp.eventId,
             provider: PROVIDER,
             createdAt: stamp.createdAt,
@@ -3427,10 +3480,29 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             return yield* Deferred.await(pending.settled);
           }
 
-          const answers = remapAnswersToClaudeQuestionText(pending.questions, result.answers);
+          let answers = remapAnswersToClaudeQuestionText(pending.questions, result.answers);
+          const captureId = context.nativeCaptureFailure
+            ? undefined
+            : yield* captureNative(context, {
+                method: "canUseTool/AskUserQuestion/resolved",
+                direction: "outgoing",
+                nativeSessionId: context.resumeSessionId,
+                nativeItemId: pending.providerItemId,
+                payload: {
+                  requestId,
+                  answers,
+                  appAnswers: result.answers,
+                  cancelled: result.cancelled,
+                },
+              }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+          if (context.nativeCaptureFailure) {
+            result = { answers: {}, cancelled: true };
+            answers = {};
+          }
           const stamp = yield* makeEventStamp();
           yield* offerRuntimeEvent(context, {
             type: "user-input.resolved",
+            ...(captureId ? { nativeCaptureId: captureId } : {}),
             eventId: stamp.eventId,
             provider: PROVIDER,
             createdAt: stamp.createdAt,
@@ -6449,7 +6521,28 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         toError(cause, "Claude runtime stream failed."),
       ).pipe(
         Stream.takeWhile(() => !context.stopped),
-        Stream.runForEach((message) => handleSdkMessage(context, message)),
+        Stream.runForEach((message) =>
+          Effect.gen(function* () {
+            const captureId = yield* captureNative(context, {
+              method: sdkNativeMethod(message),
+              payload: message,
+              direction: "incoming",
+              nativeSessionId:
+                typeof message.session_id === "string" ? message.session_id : undefined,
+              nativeEventId:
+                "uuid" in message && typeof message.uuid === "string" ? message.uuid : undefined,
+              nativeItemId: sdkNativeItemId(message),
+            });
+            if (context.stopped || context.nativeCaptureFailure) return;
+            const handling = handleSdkMessage(
+              context,
+              claudePublishedPayload(sdkNativeMethod(message), message),
+            );
+            yield* captureId
+              ? handling.pipe(Effect.provideService(NativeCaptureOrigin, captureId))
+              : handling;
+          }),
+        ),
       );
 
     const handleStreamExit = (
@@ -6610,6 +6703,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         // process tree exited. The stopped context remains non-routable and
         // prevents a replacement process from being spawned concurrently.
         yield* teardownClaudeProcess(context.session.threadId, context.processOwner);
+        if (context.nativeCapture) yield* Effect.promise(() => context.nativeCapture!.drain());
 
         // Retired background tasks cannot report their own SDK notification.
         // Publish terminal evidence only after the owned process has exited so
@@ -6896,7 +6990,22 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         const promptQueue = yield* Queue.unbounded<PromptQueueItem>();
         const prompt = Stream.fromQueue(promptQueue).pipe(
           Stream.filter((item) => item.type === "message"),
-          Stream.map((item) => item.message),
+          Stream.mapEffect((item) =>
+            !options?.nativeCapture
+              ? Effect.succeed(item.message)
+              : Effect.gen(function* () {
+                  const context = yield* Ref.get(contextRef);
+                  if (!context || context.stopped || context.nativeCaptureFailure) return undefined;
+                  yield* captureNative(context, {
+                    method: "claude/user/dispatch",
+                    direction: "outgoing",
+                    payload: item.message,
+                    nativeSessionId: context.resumeSessionId,
+                  });
+                  return context.stopped || context.nativeCaptureFailure ? undefined : item.message;
+                }),
+          ),
+          Stream.filter((message): message is SDKUserMessage => message !== undefined),
           Stream.catchCause((cause) =>
             Cause.hasInterruptsOnly(cause) ? Stream.empty : Stream.failCause(cause),
           ),
@@ -7120,221 +7229,290 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ).catch(() => ({}));
         };
 
-        const canUseTool: CanUseTool = (toolName, toolInput, callbackOptions) =>
-          Effect.runPromise(
-            Effect.gen(function* () {
-              const context = yield* Ref.get(contextRef);
-              if (!context) {
-                return {
-                  behavior: "deny",
-                  message: "Claude session context is unavailable.",
-                } satisfies PermissionResult;
-              }
+        const canUseToolImpl = (
+          ...[toolName, toolInput, callbackOptions]: Parameters<CanUseTool>
+        ) =>
+          Effect.gen(function* () {
+            const context = yield* Ref.get(contextRef);
+            if (!context) {
+              return {
+                behavior: "deny",
+                message: "Claude session context is unavailable.",
+              } satisfies PermissionResult;
+            }
 
-              // Handle AskUserQuestion: surface clarifying questions to the
-              // user via the user-input runtime event channel, regardless of
-              // runtime mode (plan mode relies on this heavily).
-              if (toolName === "AskUserQuestion") {
-                return yield* handleAskUserQuestion(context, toolInput, callbackOptions);
-              }
+            // Handle AskUserQuestion: surface clarifying questions to the
+            // user via the user-input runtime event channel, regardless of
+            // runtime mode (plan mode relies on this heavily).
+            if (toolName === "AskUserQuestion") {
+              return yield* handleAskUserQuestion(context, toolInput, callbackOptions);
+            }
 
-              if (toolName === "ExitPlanMode") {
-                const planMarkdown = extractExitPlanModePlan(toolInput);
-                if (planMarkdown) {
-                  yield* emitProposedPlanCompleted(context, {
-                    planMarkdown,
-                    toolUseId: callbackOptions.toolUseID,
-                    rawSource: "claude.sdk.permission",
-                    rawMethod: "canUseTool/ExitPlanMode",
-                    rawPayload: {
-                      toolName,
-                      input: toolInput,
-                    },
-                  });
-                }
-
-                return {
-                  behavior: "deny",
-                  message:
-                    "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.",
-                } satisfies PermissionResult;
-              }
-
-              const runtimeMode = input.runtimeMode ?? "full-access";
-              const interactionTurnId =
-                context.turnState?.turnId ??
-                (callbackOptions.agentID !== undefined ? context.lastTurnId : undefined);
-              if (
-                shouldAllowSynaraComputerProviderTool({
-                  computerControlEnabled:
-                    input.enableComputerControl === true &&
-                    context.gatewaySessionLease !== undefined,
-                  activeTurn: context.turnState !== undefined && interactionTurnId !== undefined,
-                  interactionMode: context.turnState?.interactionMode,
-                  runtimeMode,
-                  permission: { name: toolName },
-                })
-              ) {
-                return {
-                  behavior: "allow",
-                  updatedInput: toolInput,
-                } satisfies PermissionResult;
-              }
-              // A group coordinator (and any other gateway-only principal the
-              // orchestrator trusts) must not stall its turn on interactive
-              // approval for its own Synara group tools — the gateway already
-              // scopes and authorizes them server-side. File edits, shell, and
-              // every non-Synara tool keep the ordinary permission path.
-              if (
-                input.autoApproveSynaraTools === true &&
-                context.gatewaySessionLease !== undefined &&
-                isSynaraGatewayToolName(toolName)
-              ) {
-                return {
-                  behavior: "allow",
-                  updatedInput: toolInput,
-                } satisfies PermissionResult;
-              }
-              if (runtimeMode === "full-access" || context.approvalsAlwaysAllowedForSession) {
-                return {
-                  behavior: "allow",
-                  updatedInput: toolInput,
-                } satisfies PermissionResult;
-              }
-
-              // In native Auto mode the SDK calls canUseTool only for the
-              // classifier's interactive "ask" outcome. Auto-allowed calls
-              // bypass this hook, while auto-denied calls arrive as
-              // permission_denied stream messages. Keep this prompt so risky
-              // calls still reach the user instead of becoming unrestricted.
-              const requestId = ApprovalRequestId.makeUnsafe(yield* Random.nextUUIDv4);
-              const requestType = classifyRequestType(toolName);
-              // The approval detail is persisted with the card; keep credentials out.
-              const detail = summarizeToolRequest(
-                toolName,
-                toolInput,
-                JSON.stringify(toolInput, redactSensitiveJsonFields),
-              );
-              const decisionDeferred = yield* Deferred.make<ProviderApprovalDecision>();
-              const settledDeferred = yield* Deferred.make<ProviderApprovalDecision>();
-              const pendingApproval: PendingApproval = {
-                requestType,
-                detail,
-                decision: decisionDeferred,
-                settled: settledDeferred,
-                ...(interactionTurnId !== undefined ? { turnId: interactionTurnId } : {}),
-                ...(callbackOptions.toolUseID ? { providerItemId: callbackOptions.toolUseID } : {}),
-                ...(callbackOptions.agentID !== undefined
-                  ? { agentId: callbackOptions.agentID }
-                  : {}),
-                settlementStarted: false,
-                ...(callbackOptions.suggestions && callbackOptions.suggestions.length > 0
-                  ? { suggestions: callbackOptions.suggestions }
-                  : {}),
-              };
-
-              const requestedStamp = yield* makeEventStamp();
-              yield* offerRuntimeEvent(context, {
-                type: "request.opened",
-                eventId: requestedStamp.eventId,
-                provider: PROVIDER,
-                createdAt: requestedStamp.createdAt,
-                threadId: context.session.threadId,
-                ...(interactionTurnId !== undefined
-                  ? { turnId: asCanonicalTurnId(interactionTurnId) }
-                  : {}),
-                requestId: asRuntimeRequestId(requestId),
-                payload: {
-                  requestType,
-                  detail,
-                  args: {
-                    toolName,
-                    input: toolInput,
-                    sessionApprovalAvailable:
-                      callbackOptions.suggestions !== undefined &&
-                      callbackOptions.suggestions.length > 0,
-                    ...(callbackOptions.toolUseID ? { toolUseId: callbackOptions.toolUseID } : {}),
-                  },
-                },
-                providerRefs: nativeProviderRefs(context, {
-                  providerItemId: callbackOptions.toolUseID,
-                }),
-                raw: {
-                  source: "claude.sdk.permission",
-                  method: "canUseTool/request",
-                  payload: {
+            if (toolName === "ExitPlanMode") {
+              const planMarkdown = extractExitPlanModePlan(toolInput);
+              if (planMarkdown) {
+                yield* emitProposedPlanCompleted(context, {
+                  planMarkdown,
+                  toolUseId: callbackOptions.toolUseID,
+                  rawSource: "claude.sdk.permission",
+                  rawMethod: "canUseTool/ExitPlanMode",
+                  rawPayload: {
                     toolName,
                     input: toolInput,
                   },
-                },
-              });
-
-              pendingApprovals.set(requestId, pendingApproval);
-              if (
-                callbackOptions.agentID !== undefined &&
-                context.terminalTaskIds.has(callbackOptions.agentID)
-              ) {
-                yield* settlePendingApproval(context, requestId, pendingApproval, "cancel");
-              }
-
-              const onAbort = () => {
-                Effect.runFork(
-                  settlePendingApproval(context, requestId, pendingApproval, "cancel"),
-                );
-              };
-
-              callbackOptions.signal.addEventListener("abort", onAbort, {
-                once: true,
-              });
-
-              const decision = yield* Deferred.await(decisionDeferred).pipe(
-                Effect.ensuring(
-                  Effect.sync(() => {
-                    callbackOptions.signal.removeEventListener("abort", onAbort);
-                  }),
-                ),
-              );
-
-              if (decision === "accept" || decision === "acceptForSession") {
-                // Only command and file prompts widen the whole session. A tool
-                // grant stays scoped to that tool through the SDK's permission
-                // suggestions below, so the next Bash or Edit still prompts.
-                const requestKind = approvalRequestKindFromRequestType(requestType);
-                if (
-                  decision === "acceptForSession" &&
-                  runtimeMode !== "auto" &&
-                  requestKind !== null &&
-                  approvalSessionGrantWidensSessionPolicy(requestKind)
-                ) {
-                  // The SDK's permission suggestions only cover some requests;
-                  // supervised mode preserves its live "always allow" fallback.
-                  // Auto stays reviewer-gated and applies only SDK-provided
-                  // permission suggestions below.
-                  context.approvalsAlwaysAllowedForSession = true;
-                }
-                return {
-                  behavior: "allow",
-                  updatedInput: toolInput,
-                  ...(decision === "acceptForSession" && pendingApproval.suggestions
-                    ? { updatedPermissions: [...pendingApproval.suggestions] }
-                    : {}),
-                } satisfies PermissionResult;
+                });
               }
 
               return {
                 behavior: "deny",
                 message:
-                  decision === "cancel"
-                    ? "User cancelled tool execution."
-                    : "User declined tool execution.",
+                  "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.",
               } satisfies PermissionResult;
-            }),
-          );
+            }
+
+            const runtimeMode = input.runtimeMode ?? "full-access";
+            const interactionTurnId =
+              context.turnState?.turnId ??
+              (callbackOptions.agentID !== undefined ? context.lastTurnId : undefined);
+            if (
+              shouldAllowSynaraComputerProviderTool({
+                computerControlEnabled:
+                  input.enableComputerControl === true && context.gatewaySessionLease !== undefined,
+                activeTurn: context.turnState !== undefined && interactionTurnId !== undefined,
+                interactionMode: context.turnState?.interactionMode,
+                runtimeMode,
+                permission: { name: toolName },
+              })
+            ) {
+              return {
+                behavior: "allow",
+                updatedInput: toolInput,
+              } satisfies PermissionResult;
+            }
+            // A group coordinator (and any other gateway-only principal the
+            // orchestrator trusts) must not stall its turn on interactive
+            // approval for its own Synara group tools — the gateway already
+            // scopes and authorizes them server-side. File edits, shell, and
+            // every non-Synara tool keep the ordinary permission path.
+            if (
+              input.autoApproveSynaraTools === true &&
+              context.gatewaySessionLease !== undefined &&
+              isSynaraGatewayToolName(toolName)
+            ) {
+              return {
+                behavior: "allow",
+                updatedInput: toolInput,
+              } satisfies PermissionResult;
+            }
+            if (runtimeMode === "full-access" || context.approvalsAlwaysAllowedForSession) {
+              return {
+                behavior: "allow",
+                updatedInput: toolInput,
+              } satisfies PermissionResult;
+            }
+
+            // In native Auto mode the SDK calls canUseTool only for the
+            // classifier's interactive "ask" outcome. Auto-allowed calls
+            // bypass this hook, while auto-denied calls arrive as
+            // permission_denied stream messages. Keep this prompt so risky
+            // calls still reach the user instead of becoming unrestricted.
+            const requestId = ApprovalRequestId.makeUnsafe(yield* Random.nextUUIDv4);
+            const requestType = classifyRequestType(toolName);
+            // The approval detail is persisted with the card; keep credentials out.
+            const detail = summarizeToolRequest(
+              toolName,
+              toolInput,
+              JSON.stringify(toolInput, redactSensitiveJsonFields),
+            );
+            const decisionDeferred = yield* Deferred.make<ProviderApprovalDecision>();
+            const settledDeferred = yield* Deferred.make<ProviderApprovalDecision>();
+            const pendingApproval: PendingApproval = {
+              requestType,
+              detail,
+              decision: decisionDeferred,
+              settled: settledDeferred,
+              ...(interactionTurnId !== undefined ? { turnId: interactionTurnId } : {}),
+              ...(callbackOptions.toolUseID ? { providerItemId: callbackOptions.toolUseID } : {}),
+              ...(callbackOptions.agentID !== undefined
+                ? { agentId: callbackOptions.agentID }
+                : {}),
+              settlementStarted: false,
+              ...(callbackOptions.suggestions && callbackOptions.suggestions.length > 0
+                ? { suggestions: callbackOptions.suggestions }
+                : {}),
+            };
+
+            const requestedStamp = yield* makeEventStamp();
+            yield* offerRuntimeEvent(context, {
+              type: "request.opened",
+              eventId: requestedStamp.eventId,
+              provider: PROVIDER,
+              createdAt: requestedStamp.createdAt,
+              threadId: context.session.threadId,
+              ...(interactionTurnId !== undefined
+                ? { turnId: asCanonicalTurnId(interactionTurnId) }
+                : {}),
+              requestId: asRuntimeRequestId(requestId),
+              payload: {
+                requestType,
+                detail,
+                args: {
+                  toolName,
+                  input: toolInput,
+                  sessionApprovalAvailable:
+                    callbackOptions.suggestions !== undefined &&
+                    callbackOptions.suggestions.length > 0,
+                  ...(callbackOptions.toolUseID ? { toolUseId: callbackOptions.toolUseID } : {}),
+                },
+              },
+              providerRefs: nativeProviderRefs(context, {
+                providerItemId: callbackOptions.toolUseID,
+              }),
+              raw: {
+                source: "claude.sdk.permission",
+                method: "canUseTool/request",
+                payload: {
+                  toolName,
+                  input: toolInput,
+                },
+              },
+            });
+
+            pendingApprovals.set(requestId, pendingApproval);
+            if (
+              callbackOptions.agentID !== undefined &&
+              context.terminalTaskIds.has(callbackOptions.agentID)
+            ) {
+              yield* settlePendingApproval(context, requestId, pendingApproval, "cancel");
+            }
+
+            const onAbort = () => {
+              Effect.runFork(settlePendingApproval(context, requestId, pendingApproval, "cancel"));
+            };
+
+            callbackOptions.signal.addEventListener("abort", onAbort, {
+              once: true,
+            });
+            if (callbackOptions.signal.aborted) onAbort();
+
+            const decision = yield* Deferred.await(decisionDeferred).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  callbackOptions.signal.removeEventListener("abort", onAbort);
+                }),
+              ),
+            );
+
+            if (decision === "accept" || decision === "acceptForSession") {
+              // Only command and file prompts widen the whole session. A tool
+              // grant stays scoped to that tool through the SDK's permission
+              // suggestions below, so the next Bash or Edit still prompts.
+              const requestKind = approvalRequestKindFromRequestType(requestType);
+              if (
+                decision === "acceptForSession" &&
+                runtimeMode !== "auto" &&
+                requestKind !== null &&
+                approvalSessionGrantWidensSessionPolicy(requestKind)
+              ) {
+                // The SDK's permission suggestions only cover some requests;
+                // supervised mode preserves its live "always allow" fallback.
+                // Auto stays reviewer-gated and applies only SDK-provided
+                // permission suggestions below.
+                context.approvalsAlwaysAllowedForSession = true;
+              }
+              return {
+                behavior: "allow",
+                updatedInput: toolInput,
+                ...(decision === "acceptForSession" && pendingApproval.suggestions
+                  ? { updatedPermissions: [...pendingApproval.suggestions] }
+                  : {}),
+              } satisfies PermissionResult;
+            }
+
+            return {
+              behavior: "deny",
+              message:
+                decision === "cancel"
+                  ? "User cancelled tool execution."
+                  : "User declined tool execution.",
+            } satisfies PermissionResult;
+          });
+
+        const canUseTool: CanUseTool = !options?.nativeCapture
+          ? (...args) => Effect.runPromise(canUseToolImpl(...args))
+          : async (toolName, toolInput, callbackOptions) => {
+              const context = await Effect.runPromise(Ref.get(contextRef));
+              const denied = {
+                behavior: "deny",
+                message: "User cancelled tool execution.",
+              } satisfies PermissionResult;
+              if (
+                !context ||
+                context.stopped ||
+                context.nativeCaptureFailure ||
+                callbackOptions.signal.aborted
+              )
+                return denied;
+              const { signal: _signal, ...nativeOptions } = callbackOptions;
+              const frame = {
+                nativeSessionId: context.resumeSessionId,
+                nativeItemId: callbackOptions.toolUseID,
+                nativeEventId: callbackOptions.requestId,
+              };
+              try {
+                const captureId = await Effect.runPromise(
+                  captureNative(context, {
+                    ...frame,
+                    direction: "incoming",
+                    method: "canUseTool/request",
+                    payload: { toolName, input: toolInput, options: nativeOptions },
+                  }),
+                );
+                if (
+                  context.stopped ||
+                  context.nativeCaptureFailure ||
+                  callbackOptions.signal.aborted
+                )
+                  return denied;
+                const permission = canUseToolImpl(toolName, toolInput, callbackOptions);
+                let result = await Effect.runPromise(
+                  captureId
+                    ? permission.pipe(Effect.provideService(NativeCaptureOrigin, captureId))
+                    : permission,
+                );
+                if (context.stopped || context.nativeCaptureFailure) return denied;
+                if (context.stopped || callbackOptions.signal.aborted) result = denied;
+                await Effect.runPromise(
+                  captureNative(context, {
+                    ...frame,
+                    direction: "outgoing",
+                    method: "canUseTool/response",
+                    payload: result,
+                  }),
+                );
+                if (
+                  context.stopped ||
+                  callbackOptions.signal.aborted ||
+                  context.nativeCaptureFailure
+                )
+                  return denied;
+                return result;
+              } catch (cause) {
+                if (!context.nativeCaptureFailure) throw cause;
+                return denied;
+              }
+            };
 
         const providerOptions = input.providerOptions?.claudeAgent;
         const modelSelection =
           input.modelSelection?.provider === "claudeAgent" ? input.modelSelection : undefined;
         const providerInstanceId = input.providerInstanceId ?? modelSelection?.instanceId;
+        const nativeCapture = options?.nativeCapture?.({
+          threadId,
+          providerInstanceId: providerInstanceId ?? "claudeAgent",
+          runtimeSessionId: cacheProcessId,
+          lifecycleGeneration: input.lifecycleGeneration ?? cacheProcessId,
+        });
         const commandDiscoveryKey = claudeDiscoveryKey({
           instanceId: providerInstanceId,
           binaryPath: providerOptions?.binaryPath,
@@ -7495,6 +7673,24 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             : {}),
         };
 
+        if (nativeCapture)
+          yield* Effect.tryPromise({
+            try: () =>
+              nativeCapture.record({
+                method: "query/options",
+                direction: "outgoing",
+                payload: queryOptions,
+              }),
+            catch: () =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId,
+                detail: "Claude native capture failed; recording stopped.",
+              }),
+          }).pipe(
+            Effect.tapError(() => Effect.sync(() => gatewaySessionLease?.release())),
+            Effect.onInterrupt(() => Effect.sync(() => gatewaySessionLease?.release())),
+          );
         const queryRuntime = yield* Effect.tryPromise({
           try: () =>
             createQuery({
@@ -7615,6 +7811,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           };
 
           const context: ClaudeSessionContext = {
+            ...(nativeCapture ? { nativeCapture } : {}),
             ...(initialCacheObservation ? { cacheObservation: initialCacheObservation } : {}),
             ...(existingResumeSessionId ? { resultUsageMayIncludeResumedTotals: true } : {}),
             ...(gatewaySessionLease ? { gatewaySessionLease } : {}),
@@ -7763,7 +7960,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             const streamFiber = Effect.runFork(runSdkStream(context));
             context.streamFiber = streamFiber;
             streamFiber.addObserver((exit) => {
-              if (context.stopped) {
+              if (context.stopped || context.nativeCaptureFailure) {
                 return;
               }
               if (context.streamFiber === streamFiber) {

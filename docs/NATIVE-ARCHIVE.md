@@ -1,6 +1,6 @@
 # Native archive storage (VIB-004)
 
-Migration **142, `DurableNativeArchive`**, implements storage behind the [durable information contract](DURABLE-INFORMATION.md). It adds no renderer surface or provider protocol change. Codex and Claude capture-before-shaping arrive in VIB-005/006; VIB-007 connects storage failures to dispatch/publication gates. The existence of these tables does not mean current provider traffic is already captured completely.
+Migration **142, `DurableNativeArchive`**, implements storage behind the [durable information contract](DURABLE-INFORMATION.md). It adds no renderer surface or provider protocol change. [Codex](CODEX-CAPTURE.md) and [Claude](CLAUDE-CAPTURE.md) connect owned coding sessions in VIB-005/006, with the documented credential exclusions and limits. VIB-007 integrates shared durable projection/replay and dispatch-readiness guarantees. These tables do not imply complete capture of every provider or historical traffic.
 
 ## Repository and encoding
 
