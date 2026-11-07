@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 
 import { ThreadId } from "@synara/contracts";
 import { nativeTheme, type WebContents } from "electron";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 const { browserSession, fromId, webContentsViewConstructor, willDownloadListener } = vi.hoisted(
   () => {
@@ -1693,6 +1693,11 @@ describe("DesktopBrowserManager automation runtime boundary", () => {
   it.each([0.5, 1, 1.25, 2])(
     "correlates delayed CDP clicks with native coordinates at zoom %s",
     async (zoom) => {
+      // Keep correlation time independent of CI scheduling; setImmediate still
+      // exercises delivery after CDP acceptance. Expiry has its own test below.
+      let now = 10_000;
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+      onTestFinished(() => clock.mockRestore());
       const manager = new DesktopBrowserManager();
       const prepared = manager.prepareAutomationTab({ threadId: THREAD_ID, reuse: true });
       const tabId = prepared.activeTabId!;
@@ -1701,6 +1706,7 @@ describe("DesktopBrowserManager automation runtime boundary", () => {
       const sendCommand = vi.fn(async (method: string, params: Record<string, unknown>) => {
         if (method === "Input.dispatchMouseEvent" && params.type === "mousePressed") {
           setImmediate(() => {
+            now += 50;
             webContents.emit(
               "before-mouse-event",
               {},

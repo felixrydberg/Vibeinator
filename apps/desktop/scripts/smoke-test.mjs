@@ -33,19 +33,30 @@ const child = spawnSourceDesktop({
 
 let output = "";
 let forceExit;
-child.stdout.on("data", (chunk) => {
-  output += chunk.toString();
-});
-child.stderr.on("data", (chunk) => {
-  output += chunk.toString();
-});
-
-const timeout = setTimeout(() => {
+let settleTimeout;
+let startupTimedOut = false;
+function stop() {
   child.kill();
   // This fresh, empty profile never starts a provider turn or desktop input.
   // A modal startup error must not leave the unattended smoke run hanging.
   forceExit = setTimeout(() => child.kill("SIGKILL"), 5_000);
-}, 20_000);
+}
+
+// Cold CI hosts also pay for registry hydration and first-run migrations.
+// Keep a startup deadline, then observe a short settling window after readiness.
+const timeout = setTimeout(() => {
+  startupTimedOut = true;
+  stop();
+}, 60_000);
+function collectOutput(chunk) {
+  output += chunk.toString();
+  if (!startupTimedOut && settleTimeout === undefined && output.includes("Synara running")) {
+    clearTimeout(timeout);
+    settleTimeout = setTimeout(stop, 2_000);
+  }
+}
+child.stdout.on("data", collectOutput);
+child.stderr.on("data", collectOutput);
 
 function finish(exitCode) {
   rmSync(smokeHome, { recursive: true, force: true });
@@ -54,6 +65,7 @@ function finish(exitCode) {
 
 child.on("error", (error) => {
   clearTimeout(timeout);
+  clearTimeout(settleTimeout);
   clearTimeout(forceExit);
   console.error("Desktop smoke test failed to launch:", error);
   finish(1);
@@ -61,6 +73,7 @@ child.on("error", (error) => {
 
 child.on("exit", (code, signal) => {
   clearTimeout(timeout);
+  clearTimeout(settleTimeout);
   clearTimeout(forceExit);
 
   const fatalPatterns = [
@@ -73,6 +86,7 @@ child.on("exit", (code, signal) => {
     "StartupError:",
   ];
   const failures = fatalPatterns.filter((pattern) => output.includes(pattern));
+  if (startupTimedOut) failures.push("Backend startup exceeded 60 seconds");
   if (!output.includes("Synara running")) failures.push("Backend did not report readiness");
   if (code !== 0 && signal !== "SIGTERM")
     failures.push(`Unexpected exit: code=${code} signal=${signal}`);
