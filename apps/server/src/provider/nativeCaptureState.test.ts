@@ -154,6 +154,8 @@ describe("native recording readiness", () => {
               };
               yield* state.prepare(next);
               yield* state.assertReady(threadId);
+              expect((yield* Effect.result(state.observe(owner)))._tag).toBe("Failure");
+              yield* state.assertReady(threadId);
               // A late callback from the retired process cannot poison the replacement runtime.
               state.fail({
                 threadId,

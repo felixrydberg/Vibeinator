@@ -113,7 +113,15 @@ export const NativeCaptureStateLive = Layer.effect(
         active.get(threadId)?.lifecycleGeneration === generation);
     const prepare = (owner: Owner, runtimeSessionId?: string) =>
       Effect.gen(function* () {
-        if (overflow || failures.get(owner.threadId)?.generation === owner.lifecycleGeneration)
+        // Explicit lifecycle preparation may claim a replacement generation;
+        // an observed frame may only join its current owner, including after SQL yields.
+        const ownsCapture = () =>
+          runtimeSessionId === undefined || canRecord(owner.threadId, owner.lifecycleGeneration);
+        if (
+          overflow ||
+          failures.get(owner.threadId)?.generation === owner.lifecycleGeneration ||
+          !ownsCapture()
+        )
           return yield* Effect.fail(error());
         const timestamp = new Date().toISOString();
         const owners =
@@ -130,7 +138,8 @@ export const NativeCaptureStateLive = Layer.effect(
         if (
           rows[0]?.phase === "failed" ||
           overflow ||
-          failures.get(owner.threadId)?.generation === owner.lifecycleGeneration
+          failures.get(owner.threadId)?.generation === owner.lifecycleGeneration ||
+          !ownsCapture()
         )
           return yield* Effect.fail(error());
         active.set(owner.threadId, owner);
