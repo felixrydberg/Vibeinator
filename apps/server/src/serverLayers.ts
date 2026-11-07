@@ -3,6 +3,7 @@ import { OrchestrationCommandReceiptRepositoryLive } from "./persistence/Layers/
 import { QueuedTurnPromotionRepositoryLive } from "./persistence/Layers/QueuedTurnPromotions";
 import { HubWorkRepositoryLive } from "./persistence/Layers/HubWorkRepository";
 import { ManagedAttachmentRepositoryLive } from "./persistence/Layers/ManagedAttachments";
+import { NativeArchiveRepositoryLive } from "./persistence/Layers/NativeArchive";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Layer } from "effect";
 
@@ -308,6 +309,7 @@ export function makeServerRuntimeServicesLayer(
   );
 
   return Layer.mergeAll(
+    NativeArchiveRepositoryLive,
     agentGatewayCredentialsLayer,
     agentGatewayLayer,
     BrowserAutomationHostLive,

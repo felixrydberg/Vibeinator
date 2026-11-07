@@ -17,6 +17,7 @@ import { ensurePrivateFileSync, repairPrivateFile } from "../../privatePathPermi
 import { resolveSqliteMemoryBudget } from "../sqliteMemoryBudget.ts";
 import { reclaimFreedSqlitePages, reclaimLegacySqliteDatabase } from "../SqliteReclamation.ts";
 import { ServerConfig } from "../../config.ts";
+import { runNativeArchiveBackfill } from "../nativeArchiveBackfill.ts";
 import {
   acquireDatabaseLifecycleLock,
   releaseDatabaseLifecycleLock,
@@ -167,6 +168,7 @@ const makeSetup = ({
             : Effect.fail(cause),
         ),
       );
+      yield* runNativeArchiveBackfill;
       if (dbPath) {
         const mode = yield* sql<{ readonly auto_vacuum: number }>`PRAGMA auto_vacuum;`;
         onSetupComplete?.(mode[0]?.auto_vacuum === 0);

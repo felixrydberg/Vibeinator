@@ -1,6 +1,6 @@
 # Durable information contract
 
-VIB-003 defines the shared records in [durableInformation.ts](../packages/contracts/src/durableInformation.ts), schema fixtures and repository invariants. It adds no archive tables or runtime capture. VIB-004 implements payload persistence; VIB-005/006 connect adapters; VIB-007 enforces capture-before-publication. Summary, objective and packet repositories arrive in their assigned issues. These definitions do not mean those features already work.
+VIB-003 defines the shared records in [durableInformation.ts](../packages/contracts/src/durableInformation.ts), schema fixtures and repository invariants. VIB-004 implements [archive storage and historical backfill](NATIVE-ARCHIVE.md) in migration 142. VIB-005/006 connect adapters; VIB-007 enforces capture-before-publication. Summary, objective and packet repositories arrive in their assigned issues. Shared definitions do not mean those later features already work.
 
 ## Ownership and durability
 
@@ -56,7 +56,7 @@ Packet limits are measured in JavaScript UTF-16 code units, distinct from archiv
 
 ## Additive migration and deletion contract
 
-The pinned lineage ends at **141**. VIB-003 registers no migration. VIB-004 must derive the next ID from `LATEST_MIGRATION_ID` at implementation time, statically register it in `Migrations.ts`, and pass `bun run migrations:check`. Never edit released migrations or fill historical slots. Preserve historical tracker aliases and reconciliation. New migrations must tolerate the existing replay path without resetting heads, cursors, objectives, payloads or command receipts. Retain original Synara names in historical tracker rows.
+The pinned lineage ends at **141**; VIB-004 registers **142, DurableNativeArchive**. Future migrations must derive the next ID from `LATEST_MIGRATION_ID` at implementation time, register it statically in `Migrations.ts`, and pass `bun run migrations:check`. Never edit released migrations or fill historical slots. Preserve historical tracker aliases and reconciliation. New migrations must tolerate the existing replay path without resetting heads, cursors, objectives, payloads or command receipts. Retain original Synara names in historical tracker rows.
 
 New archive tables own their durable parents. Do not foreign-key archive content to rebuildable `projection_*` rows, prunable operational rows or managed-file cleanup rows. Payload chunks reference their durable payload parent; normalization links reference retained captures and durable orchestration events. Candidate/summary/objective sources and packet revision references must have relational link tables with checked foreign keys, rather than unchecked IDs hidden only inside JSON. Keep project/thread ownership columns and validate membership transactionally against the authoritative event-derived ownership under the engine's write boundary. Avoid migrating old projects/chats into a second independently editable owner registry.
 

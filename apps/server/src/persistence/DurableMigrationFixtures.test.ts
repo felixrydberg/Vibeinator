@@ -10,6 +10,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { LATEST_MIGRATION_ID, migrationEntries, runMigrations } from "./Migrations.ts";
 import { MigrationSchemaTooNewError } from "./Errors.ts";
 import * as NodeSqliteClient from "./NodeSqliteClient.ts";
+import { runNativeArchiveBackfill } from "./nativeArchiveBackfill.ts";
 
 const fixtures = [
   { name: "synara-v0.5.5", migrationId: 54 },
@@ -191,6 +192,13 @@ describe("durable migration fixtures", () => {
             const sql = yield* SqlClient.SqlClient;
             yield* sql`PRAGMA foreign_keys = ON`;
             yield* runMigrations();
+            yield* runNativeArchiveBackfill;
+            expect(
+              yield* sql`SELECT COUNT(*) AS count FROM durable_legacy_sources WHERE source_kind = 'message'`,
+            ).toEqual([{ count: 1 }]);
+            expect(yield* sql`SELECT COUNT(*) AS count FROM native_captures`).toEqual([
+              { count: 0 },
+            ]);
             // A second startup is a no-op; neither startup creates or dispatches provider work.
             expect(yield* runMigrations()).toEqual([]);
             expect(yield* sql`PRAGMA foreign_key_check`).toEqual([]);
