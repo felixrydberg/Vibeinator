@@ -47,6 +47,11 @@ import { writeFileStringAtomically } from "./atomicWrite";
 import { isServerBetaFeatureEnabled } from "./betaFeatureGate";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore";
 import { ServerSecretStore } from "./auth/Services/ServerSecretStore";
+import {
+  DECISION_ENGINE_CREDENTIAL_SECRET,
+  encodeDecisionCredential,
+  readDecisionCredential,
+} from "./decisionEngine/credentials.ts";
 import { ServerConfig } from "./config";
 import {
   GIT_TEXT_GENERATION_PROVIDER_ORDER,
@@ -505,8 +510,12 @@ function normalizeSettings(
       (cause) =>
         new ServerSettingsError({
           settingsPath,
-          detail: `failed to normalize server settings: ${SchemaIssue.makeFormatterDefault()(cause.issue)}`,
-          cause,
+          ...(patch.decisionEngine !== undefined
+            ? { detail: "failed to normalize decision-engine settings" }
+            : {
+                detail: `failed to normalize server settings: ${SchemaIssue.makeFormatterDefault()(cause.issue)}`,
+                cause,
+              }),
         }),
     ),
   );
@@ -532,15 +541,20 @@ function readLegacyProviderPasswords(raw: string): ReadonlyMap<ExternalProviderS
   }
 }
 
-function omitProviderPasswords(patch: ServerSettingsPatch): ServerSettingsPatch {
-  if (!patch.providers) return patch;
-  const { serverPassword: _openCodePassword, ...opencode } = patch.providers.opencode ?? {};
+function omitSettingsCredentials(patch: ServerSettingsPatch): ServerSettingsPatch {
+  const { credential: _credential, ...decisionEngine } = patch.decisionEngine ?? {};
+  const { serverPassword: _openCodePassword, ...opencode } = patch.providers?.opencode ?? {};
   return {
     ...patch,
-    providers: {
-      ...patch.providers,
-      ...(patch.providers.opencode ? { opencode } : {}),
-    },
+    ...(patch.decisionEngine ? { decisionEngine } : {}),
+    ...(patch.providers
+      ? {
+          providers: {
+            ...patch.providers,
+            ...(patch.providers.opencode ? { opencode } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -956,10 +970,20 @@ const makeServerSettings = Effect.gen(function* () {
   const withCredentialState = (settings: ServerSettings) =>
     Effect.all({
       opencode: providerCredentials.isServerPasswordConfigured("opencode"),
+      decisionEngine: secretStore.get(DECISION_ENGINE_CREDENTIAL_SECRET).pipe(
+        Effect.map(
+          (bytes) => readDecisionCredential(settings.decisionEngine.endpoint, bytes) !== null,
+        ),
+        Effect.orElseSucceed(() => false),
+      ),
     }).pipe(
       Effect.map(
         (configured): ServerSettings => ({
           ...settings,
+          decisionEngine: {
+            ...settings.decisionEngine,
+            credentialConfigured: configured.decisionEngine,
+          },
           providers: {
             ...settings.providers,
             opencode: {
@@ -1205,8 +1229,36 @@ const makeServerSettings = Effect.gen(function* () {
             const normalized = yield* normalizeSettings(
               settingsPath,
               current,
-              omitProviderPasswords(patch),
+              omitSettingsCredentials(patch),
             );
+            if (patch.decisionEngine?.credential !== undefined) {
+              const bytes = yield* Effect.try({
+                try: () =>
+                  encodeDecisionCredential(
+                    normalized.decisionEngine.endpoint,
+                    patch.decisionEngine!.credential ?? null,
+                  ),
+                catch: () =>
+                  new ServerSettingsError({
+                    settingsPath,
+                    detail: "invalid decision-engine credential",
+                  }),
+              });
+              yield* writeTrackedProviderSecret(
+                providerSecretSnapshots,
+                DECISION_ENGINE_CREDENTIAL_SECRET,
+                bytes,
+                "decision-engine credential",
+              ).pipe(
+                Effect.mapError(
+                  () =>
+                    new ServerSettingsError({
+                      settingsPath,
+                      detail: "failed to persist decision-engine credential",
+                    }),
+                ),
+              );
+            }
             const next = yield* withCredentialState(normalized);
             const nextRevision = Math.max(disk.revision, yield* Ref.get(revisionRef)) + 1;
             const {

@@ -2,7 +2,7 @@
 
 A desktop app for working with Codex and Claude while preserving project context across sessions and provider switches.
 
-Status: the desktop baseline, SQLite archive storage, Codex/Claude native capture, [capture failure/replay guarantees](docs/CAPTURE-REPLAY.md), [project history search/exact reads](docs/PROJECT-HISTORY.md), [summary revision storage](docs/SUMMARY-REVISIONS.md) and [bounded, durable handoff dispatch](docs/HANDOFF-PACKETS.md) are implemented. Conversations restore paused after restart. Automatic summary generation and summary/context panels remain planned. Windows is the current CI gate; Linux qualification is deferred.
+Status: the desktop baseline, SQLite archive storage, Codex/Claude native capture, [capture failure/replay guarantees](docs/CAPTURE-REPLAY.md), [project history search/exact reads](docs/PROJECT-HISTORY.md), [summary revision storage](docs/SUMMARY-REVISIONS.md), [bounded, durable handoff dispatch](docs/HANDOFF-PACKETS.md) and the [decision-engine client](docs/DECISION-ENGINE.md) are implemented. Conversations restore paused after restart. Automatic summary generation and summary/context panels remain planned. Windows is the current CI gate; Linux qualification is deferred.
 
 The [Synara audit](docs/SYNARA-AUDIT.md) maps the existing implementation and confirmed gaps. The [implementation draft](docs/IMPLEMENTATION-DRAFT.md) defines issues, dependencies, acceptance criteria, and milestone order. The [tracker](docs/IMPLEMENTATION-TRACKER.md) links twenty GitHub issues and records delivery state. The [adoption report](docs/BASELINE-ADOPTION.md) records passing checks and remaining qualification. [UPSTREAM.md](UPSTREAM.md) records the source revision and retained notices.
 
@@ -114,7 +114,7 @@ Install the model separately:
 ollama pull clef
 ```
 
-Planned decision-engine defaults:
+[Decision-engine client](docs/DECISION-ENGINE.md) defaults:
 
 ```json
 {
@@ -126,6 +126,8 @@ Planned decision-engine defaults:
 Define `DecisionEngine.decide(state, questions)` using typed System One questions, initially `choice`. Requests carry `model`, `state`, and named `questions`; responses contain named `answers`. Use the HTTP API directly rather than generating classifications through a chat prompt.
 
 Configure the endpoint, model, timeout, and optional credential so a hosted Jev/System One-compatible engine can replace Ollama mainly through configuration. `clef-flash` is an optional smaller model selection; `clef` remains the default.
+
+The backend client is implemented; classification and summary refresh remain planned. It runs only when called, returns conservative typed fallbacks when unavailable or invalid, and keeps optional credentials in the existing secret store. Settings UI remains deferred.
 
 Clef selects information worth retaining, categorizes it, chooses among allowed local operations, and filters irrelevant context. Claude/Codex write summaries and make coding and architectural decisions. Clef never grants permissions or decides that a goal is correctly implemented.
 

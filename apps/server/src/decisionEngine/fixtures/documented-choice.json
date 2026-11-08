@@ -1,0 +1,12 @@
+{
+  "model": "clef",
+  "answers": {
+    "team": {
+      "type": "choice",
+      "choice": "billing",
+      "probabilities": { "billing": 0.9888, "technical": 0.0044, "other": 0.0068 },
+      "confidence": 0.9667
+    }
+  },
+  "usage": { "input_tokens": 332, "output_tokens": 0 }
+}

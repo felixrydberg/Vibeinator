@@ -6,6 +6,7 @@ import { ManagedAttachmentRepositoryLive } from "./persistence/Layers/ManagedAtt
 import { NativeArchiveRepositoryLive } from "./persistence/Layers/NativeArchive";
 import { ProjectHistoryRepositoryLive } from "./persistence/Layers/ProjectHistory";
 import { SummaryStoreRepositoryLive } from "./persistence/Layers/SummaryStore";
+import { DecisionEngineLive } from "./decisionEngine/Layers/DecisionEngine.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Layer } from "effect";
 
@@ -313,6 +314,10 @@ export function makeServerRuntimeServicesLayer(
   );
 
   return Layer.mergeAll(
+    DecisionEngineLive.pipe(
+      Layer.provide(serverSettingsLayer),
+      Layer.provide(ServerSecretStoreLive),
+    ),
     SummaryStoreRepositoryLive,
     NativeArchiveRepositoryLive,
     agentGatewayCredentialsLayer,

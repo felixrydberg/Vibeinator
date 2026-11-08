@@ -3,6 +3,13 @@ import { IsoDateTime, NonNegativeInt, TrimmedString } from "./baseSchemas";
 import { DEFAULT_GIT_TEXT_GENERATION_MODEL } from "./model";
 import { ModelSelection, ProviderKind, ThreadEnvironmentMode } from "./orchestration";
 import { ProviderInstanceConfigMap, ProviderInstanceId } from "./providerInstance";
+import {
+  DecisionEngineSettings,
+  DecisionEngineEndpoint,
+  DecisionEngineModel,
+  DecisionEngineTimeout,
+  DecisionEngineCredential,
+} from "./decisionEngine";
 
 const StringSetting = TrimmedString.check(Schema.isMaxLength(4096));
 const CustomModels = Schema.Array(Schema.String.check(Schema.isMaxLength(256))).pipe(
@@ -141,6 +148,7 @@ export type KeepAwakeMode = typeof KeepAwakeMode.Type;
 export const DEFAULT_KEEP_AWAKE_MODE: KeepAwakeMode = "off";
 
 export const ServerSettings = Schema.Struct({
+  decisionEngine: DecisionEngineSettings.pipe(Schema.withDecodingDefault(() => ({}))),
   autoResumeAfterUsageLimits: Schema.Boolean.pipe(Schema.withDecodingDefault(() => false)),
   // Server-owned epoch: disabling invalidates pending waits across a rapid re-enable/restart.
   usageLimitRecoveryEpoch: NonNegativeInt.pipe(Schema.withDecodingDefault(() => 0)),
@@ -211,6 +219,16 @@ const ProviderSettingsBasePatch = {
 };
 
 export const ServerSettingsPatch = Schema.Struct({
+  decisionEngine: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      endpoint: Schema.optionalKey(DecisionEngineEndpoint),
+      model: Schema.optionalKey(DecisionEngineModel),
+      timeoutMs: Schema.optionalKey(DecisionEngineTimeout),
+      // Write-only. Only its configured state belongs in snapshots, events or settings.json.
+      credential: Schema.optionalKey(Schema.NullOr(DecisionEngineCredential)),
+    }),
+  ),
   autoResumeAfterUsageLimits: Schema.optionalKey(Schema.Boolean),
   enableAssistantStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
