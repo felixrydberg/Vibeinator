@@ -98,6 +98,25 @@ describe("buildHandoffBootstrapText", () => {
 });
 
 describe("buildPriorTranscriptBootstrapText", () => {
+  it("preserves the latest decision instead of an older long excerpt at 700 characters", () => {
+    const messages = [
+      message(0, "user", "old ".repeat(251)),
+      message(1, "assistant", "LATEST-DECISION: keep SQLite"),
+    ];
+    const bootstrap = buildPriorTranscriptBootstrap(thread(messages), undefined, 700);
+    expect(bootstrap?.text).toContain("LATEST-DECISION: keep SQLite");
+    expect(bootstrap!.text.length).toBeLessThanOrEqual(700);
+  });
+
+  it.each([0, 1, 2])("obeys a %i character allowance", (budget) => {
+    const result = buildPriorTranscriptBootstrap(
+      thread([message(0, "user", "long message")]),
+      undefined,
+      budget,
+    );
+    expect(result!.text.length).toBeLessThanOrEqual(budget);
+    expect(result?.omittedMessages).toBe(1);
+  });
   it.each([
     { lengths: [30, 30], budget: 32_000, omitted: 0, shortened: 0 },
     { lengths: Array.from({ length: 8 }, () => 400), budget: 32_000, omitted: 0, shortened: 2 },

@@ -1,3 +1,8 @@
+import {
+  availableProviderContextChars,
+  wrapProviderContext,
+  type BootstrapContextSelection,
+} from "../providerContext.ts";
 import { appendAppSnapPromptContext } from "../../provider/appSnapPromptContext.ts";
 import { isServerBetaFeatureEnabled } from "../../betaFeatureGate";
 import { MCP_CONNECTORS_BETA_FEATURE } from "@synara/shared/betaFeatures";
@@ -735,40 +740,6 @@ function sidechatBoundaryInstruction(
   return thread.sidechatContext
     ? buildStandaloneSidechatBoundaryInstruction(thread.sidechatContext)
     : null;
-}
-
-type ProviderContextTag = "handoff_context" | "sidechat_context" | "thread_context";
-
-interface BootstrapContextSelection {
-  readonly tag: ProviderContextTag;
-  readonly contextText: string;
-  readonly wrapLatestUserMessage: boolean;
-}
-
-function wrapProviderContext(input: {
-  readonly tag: ProviderContextTag;
-  readonly contextText: string;
-  readonly messageText: string;
-  readonly wrapLatestUserMessage: boolean;
-}): string {
-  const messageSection = input.wrapLatestUserMessage
-    ? `<latest_user_message>\n${input.messageText}\n</latest_user_message>`
-    : input.messageText;
-  return `<${input.tag}>\n${input.contextText}\n</${input.tag}>\n\n${messageSection}`;
-}
-
-function availableProviderContextChars(input: {
-  readonly tag: ProviderContextTag;
-  readonly messageText: string;
-  readonly wrapLatestUserMessage: boolean;
-  readonly reservedChars?: number;
-}): number {
-  return Math.max(
-    0,
-    PROVIDER_SEND_TURN_MAX_INPUT_CHARS -
-      wrapProviderContext({ ...input, contextText: "" }).length -
-      (input.reservedChars ?? 0),
-  );
 }
 
 function availableThreadMentionContextChars(messageText: string, reservedChars = 0): number {

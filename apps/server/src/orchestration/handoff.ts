@@ -1,5 +1,5 @@
 import type { OrchestrationMessage, OrchestrationThread } from "@synara/contracts";
-import { unicodeSafeEndOffset } from "@synara/shared/text";
+import { selectNewestHandoffMessages } from "./handoffSelection.ts";
 
 const RECENT_MESSAGE_COUNT = 6;
 const EARLIER_MESSAGE_CHAR_LIMIT = 320;
@@ -19,15 +19,6 @@ function normalizeMessageText(value: string): string {
     .replace(/\s+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-}
-
-function truncateText(value: string, maxChars: number): string {
-  if (value.length <= maxChars) {
-    return value;
-  }
-  const requestedEndOffset = Math.max(0, maxChars - 3);
-  const endOffset = unicodeSafeEndOffset(value, requestedEndOffset);
-  return `${value.slice(0, endOffset).trimEnd()}...`;
 }
 
 function roleLabel(message: Pick<OrchestrationMessage, "role">): "User" | "Assistant" {
@@ -118,114 +109,51 @@ function buildImportedMessagesBootstrap(input: {
   intro: string;
   maxChars: number;
 }): TranscriptBootstrap | null {
-  if (input.importedMessages.length === 0) {
-    return null;
-  }
-
-  const maxChars = Math.min(Math.max(0, input.maxChars), BOOTSTRAP_TRANSCRIPT_CHAR_BUDGET);
-  const earlierMessages = input.importedMessages.slice(0, -RECENT_MESSAGE_COUNT);
-  const recentMessages = input.importedMessages.slice(-RECENT_MESSAGE_COUNT);
-  const sections: string[] = [input.intro, `Original conversation title: ${input.thread.title}`];
-  const excerpts: Array<{ start: number; end: number; shortened: boolean }> = [];
-
-  if (input.thread.branch) {
-    sections.push(`Git branch: ${input.thread.branch}`);
-  }
-  if (input.thread.worktreePath) {
-    sections.push(`Worktree path: ${input.thread.worktreePath}`);
-  }
-
-  const renderMessage = (message: OrchestrationMessage, limit: number, earlier: boolean) => {
-    const normalized = normalizeMessageText(message.text);
-    const prefix = earlier ? `- ${roleLabel(message)}: ` : `${roleLabel(message)}:\n`;
-    return {
-      text: `${prefix}${truncateText(normalized, limit)}`,
-      contentOffset: prefix.length,
-      shortened: normalized.length > limit,
-    };
-  };
-  const appendMessageSection = (
-    header: string,
-    messages: ReadonlyArray<ReturnType<typeof renderMessage>>,
-    separator: string,
-  ) => {
-    let offset =
-      sections.reduce((total, section) => total + section.length + 2, 0) + header.length + 1;
-    for (const message of messages) {
-      excerpts.push({
-        start: offset + message.contentOffset,
-        end: offset + message.text.length,
-        shortened: message.shortened,
-      });
-      offset += message.text.length + separator.length;
-    }
-    sections.push(
-      messages.length > 0
-        ? `${header}\n${messages.map((message) => message.text).join(separator)}`
-        : header,
-    );
-  };
-  const recentExcerpts = recentMessages.map((message) =>
-    renderMessage(message, RECENT_MESSAGE_CHAR_LIMIT, false),
+  if (input.importedMessages.length === 0) return null;
+  const maxChars = Math.floor(
+    Math.min(Math.max(0, input.maxChars), BOOTSTRAP_TRANSCRIPT_CHAR_BUDGET),
   );
-  const recentHeader = "Most recent imported messages:";
-  const recentSectionLength =
-    recentHeader.length +
-    1 +
-    recentExcerpts.reduce(
-      (total, message, index) => total + message.text.length + (index > 0 ? 2 : 0),
-      0,
-    );
-
-  if (earlierMessages.length > 0) {
-    // Keep the newest earlier-message summaries that fit the remaining budget;
-    // older ones are dropped so long threads cannot inflate the bootstrap.
-    let remaining =
-      maxChars -
-      sections.reduce((total, section) => total + section.length + 2, 0) -
-      (recentSectionLength + 2);
-    // Reserve space for the omission header up front so accepted summary
-    // lines can never push the assembled section past `remaining`. The
-    // header only shrinks as more lines are accepted (omittedCount falls
-    // monotonically from earlierMessages.length toward 0, and shorter/no
-    // counts never produce a longer header), so sizing the reservation off
-    // the largest possible omitted count is a true worst-case bound, not
-    // just a conservative guess. The extra `+ 1` covers the "\n" that joins
-    // the header to the summary lines when at least one line is kept.
-    remaining -= earlierSummaryHeader(earlierMessages.length).length + 1;
-    const summaryLines: Array<ReturnType<typeof renderMessage>> = [];
-    for (let index = earlierMessages.length - 1; index >= 0; index -= 1) {
-      const message = earlierMessages[index]!;
-      const line = renderMessage(message, EARLIER_MESSAGE_CHAR_LIMIT, true);
-      if (remaining < line.text.length + 1) {
-        break;
-      }
-      remaining -= line.text.length + 1;
-      summaryLines.push(line);
-    }
-    summaryLines.reverse();
-    const omittedCount = earlierMessages.length - summaryLines.length;
-    const header = earlierSummaryHeader(omittedCount);
-    appendMessageSection(header, summaryLines, "\n");
-  }
-
-  appendMessageSection(recentHeader, recentExcerpts, "\n\n");
-
-  const joined = sections.join("\n\n").trim();
-  const text = truncateText(joined, maxChars);
-  // The final input budget can also cut the recent-message section. Count
-  // only excerpts that actually reached the provider, including partial ones.
-  const retainedChars = text === joined ? text.length : Math.max(0, text.length - 3);
-  const includedExcerpts = excerpts.filter((excerpt) => excerpt.start < retainedChars);
+  const earlierCount = Math.max(0, input.importedMessages.length - RECENT_MESSAGE_COUNT);
+  const messages = input.importedMessages.map((message, index) => ({
+    ...message,
+    text: normalizeMessageText(message.text),
+    earlier: index < earlierCount,
+  }));
+  const result = selectNewestHandoffMessages({
+    messages,
+    maxMessages: messages.length,
+    maxTextChars: maxChars,
+    maxOutputChars: maxChars,
+    messageLimit: (index) =>
+      index < earlierCount ? EARLIER_MESSAGE_CHAR_LIMIT : RECENT_MESSAGE_CHAR_LIMIT,
+    render: (selected) => {
+      const sections = [input.intro, `Original conversation title: ${input.thread.title}`];
+      if (input.thread.branch) sections.push(`Git branch: ${input.thread.branch}`);
+      if (input.thread.worktreePath) sections.push(`Worktree path: ${input.thread.worktreePath}`);
+      const earlier = selected.filter((item) => item.message.earlier);
+      const recent = selected.filter((item) => !item.message.earlier);
+      if (earlierCount > 0)
+        sections.push(
+          [
+            earlierSummaryHeader(earlierCount - earlier.length),
+            ...earlier.map((item) => `- ${roleLabel(item.message)}: ${item.text}`),
+          ].join("\n"),
+        );
+      sections.push(
+        "Most recent imported messages:" +
+          (recent.length
+            ? "\n" + recent.map((item) => `${roleLabel(item.message)}:\n${item.text}`).join("\n\n")
+            : ""),
+      );
+      return sections.join("\n\n").trim();
+    },
+  });
   return {
-    text,
-    omittedMessages: input.importedMessages.length - includedExcerpts.length,
-    shortenedMessages: includedExcerpts.filter(
-      (excerpt) => excerpt.shortened || excerpt.end > retainedChars,
-    ).length,
+    text: result.text,
+    omittedMessages: messages.length - result.selected.length,
+    shortenedMessages: result.selected.filter((item) => item.shortened).length,
   };
 }
-
 export function buildHandoffBootstrapText(
   thread: Pick<OrchestrationThread, "title" | "branch" | "worktreePath" | "handoff" | "messages">,
   maxChars = BOOTSTRAP_TRANSCRIPT_CHAR_BUDGET,
