@@ -81,7 +81,8 @@ export const makeProjectHistoryRepository = Effect.gen(function* () {
             )
             .digest("hex");
           const states = yield* sql<{ epoch: string; through: number }>`SELECT epoch,
-      (SELECT COALESCE(MAX(id), 0) FROM history_documents) AS through FROM history_index_state WHERE singleton = 1`;
+      COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'history_documents'), 0) AS through
+      FROM history_index_state WHERE singleton = 1`;
           const state = states[0]!;
           let after = 0;
           let through = state.through;

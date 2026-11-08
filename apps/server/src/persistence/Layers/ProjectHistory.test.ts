@@ -168,15 +168,20 @@ describe("project history", () => {
           yield* Effect.gen(function* () {
             const journal = yield* ProviderRuntimeEventRepository;
             let last = 0;
-            for (let i = 0; i < 1030; i++)
-              last = (yield* journal.append({
-                eventId: EventId.makeUnsafe(`runtime-${i}`),
-                provider: "codex",
-                threadId: caller,
-                createdAt: time,
-                type: "runtime.warning",
-                payload: { message: "operational" },
-              })).sequence;
+            // Retention needs real journal rows, not 1,030 separate disk flushes during setup.
+            yield* sql.withTransaction(
+              Effect.gen(function* () {
+                for (let i = 0; i < 1030; i++)
+                  last = (yield* journal.append({
+                    eventId: EventId.makeUnsafe(`runtime-${i}`),
+                    provider: "codex",
+                    threadId: caller,
+                    createdAt: time,
+                    type: "runtime.warning",
+                    payload: { message: "operational" },
+                  })).sequence;
+              }),
+            );
             yield* sql`INSERT INTO provider_runtime_event_consumers(consumer_name, last_acked_sequence, created_at, updated_at) VALUES (${CHECKPOINT_RUNTIME_CONSUMER}, 0, ${time}, ${time})`;
             for (const consumerName of [
               PROVIDER_RUNTIME_INGESTION_CONSUMER,
@@ -322,6 +327,11 @@ describe("project history", () => {
         const first = yield* history.search(caller, { query: "oldfact" });
         expect(first.matches.length).toBeGreaterThan(0);
         expect(first.nextCursor).toBeTruthy();
+        yield* sql`DELETE FROM orchestration_events WHERE event_id = 'old-14'`;
+        // Deleting the newest source must not invalidate an already-issued high-water fence.
+        expect(
+          (yield* history.search(caller, { query: "oldfact", cursor: first.nextCursor! })).matches,
+        ).toHaveLength(6);
         yield* event("later", "oldfact");
         const ids = first.matches.map((match) => match.sourceId);
         let cursor = first.nextCursor;
@@ -330,8 +340,8 @@ describe("project history", () => {
           ids.push(...page.matches.map((match) => match.sourceId));
           cursor = page.nextCursor;
         }
-        expect(ids).toHaveLength(15);
-        expect(new Set(ids).size).toBe(15);
+        expect(ids).toHaveLength(14);
+        expect(new Set(ids).size).toBe(14);
         expect(ids).not.toContain("later");
         const original = first.matches[0]!;
         yield* sql`UPDATE orchestration_events SET payload_json = '{"text":"replacementfact"}' WHERE event_id = ${original.sourceId}`;
