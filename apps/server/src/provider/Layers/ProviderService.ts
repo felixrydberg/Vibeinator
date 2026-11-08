@@ -73,6 +73,7 @@ import {
   ProviderAdapterProcessError,
   ProviderUnsupportedError,
   ProviderValidationError,
+  ProviderSessionNotFoundError,
 } from "../Errors.ts";
 import type {
   ProviderAdapterShape,
@@ -4248,16 +4249,24 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             const adapterOptions = options?.claudeCompactionCancellation
               ? { claudeCompactionCancellation: options.claudeCompactionCancellation }
               : undefined;
-            const turn = yield* (
-              adapterOptions
+            const turn = yield* Effect.gen(function* () {
+              if (packetId) {
+                yield* assertRecordingReady(input.threadId);
+                // A Stop/replacement may retire this route while the packet waits for SQL.
+                if (lifecycle.currentGeneration(input.threadId) !== routed.lifecycleGeneration)
+                  return yield* new ProviderSessionNotFoundError({ threadId: input.threadId });
+              }
+              return yield* adapterOptions
                 ? routed.adapter.sendTurn(routedInput, adapterOptions)
-                : routed.adapter.sendTurn(routedInput)
-            ).pipe(
+                : routed.adapter.sendTurn(routedInput);
+            }).pipe(
               Effect.tapError((error) => {
                 const rejected =
                   error._tag === "ProviderAdapterValidationError" ||
                   error._tag === "ProviderAdapterSessionNotFoundError" ||
                   error._tag === "ProviderAdapterSessionClosedError" ||
+                  error._tag === "ProviderSessionNotFoundError" ||
+                  error._tag === "ProviderValidationError" ||
                   (error._tag === "ProviderAdapterProcessError" &&
                     error.reason === "startup-failed");
                 return packetId && handoffStore && rejected

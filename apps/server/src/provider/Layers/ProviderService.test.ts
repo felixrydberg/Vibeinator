@@ -812,8 +812,8 @@ for (const driver of ["codex", "claudeAgent"] as const) {
               saved!.outcomes.map((entry) => entry.outcome),
               ["uncertain"],
             );
-            return yield* send(input);
-          }).pipe(Effect.orDie),
+            return input;
+          }).pipe(Effect.orDie, Effect.flatMap(send)),
         );
         yield* sql`CREATE TRIGGER fail_packet BEFORE INSERT ON handoff_packets BEGIN SELECT RAISE(ABORT, 'fixture'); END`;
         const blocked = yield* provider.sendTurn(sendInput, options).pipe(Effect.result);
@@ -839,6 +839,31 @@ for (const driver of ["codex", "claudeAgent"] as const) {
         assert.deepEqual(
           latest.map((entry) => entry.outcome),
           ["uncertain"],
+        );
+        yield* sql`DROP TRIGGER fail_receipt`;
+        const stopped = yield* provider
+          .sendTurn(sendInput, {
+            handoff: {
+              ...options.handoff,
+              store: {
+                ...store,
+                prepare: (input) =>
+                  store
+                    .prepare(input)
+                    .pipe(
+                      Effect.tap(() =>
+                        provider.stopRuntimeSession!({ threadId }).pipe(Effect.orDie),
+                      ),
+                    ),
+              },
+            },
+          })
+          .pipe(Effect.result);
+        assert.equal(stopped._tag, "Failure");
+        assert.equal(
+          adapter.sendTurn.mock.calls.length,
+          2,
+          "A Stop during packet persistence must prevent adapter dispatch",
         );
       }).pipe(Effect.provide(layer));
     },
