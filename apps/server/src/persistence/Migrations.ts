@@ -155,6 +155,7 @@ import Migration0135 from "./Migrations/135_ProjectionMessageTurnActivityIndex.t
 import Migration0141 from "./Migrations/141_ProjectionThreadsUsageLimitRecovery.ts";
 import Migration0142 from "./Migrations/142_DurableNativeArchive.ts";
 import Migration0143 from "./Migrations/143_NativeRecordingSessions.ts";
+import Migration0144 from "./Migrations/144_ProjectHistorySearch.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -309,6 +310,7 @@ export const migrationEntries = [
   [141, "ProjectionThreadsUsageLimitRecovery", Migration0141],
   [142, "DurableNativeArchive", Migration0142],
   [143, "NativeRecordingSessions", Migration0143],
+  [144, "ProjectHistorySearch", Migration0144],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

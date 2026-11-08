@@ -527,7 +527,7 @@ describe("native archive", () => {
     );
   });
 
-  it("replays migrations 142/143 without resetting archive identities, recording intent or backfill progress", async () => {
+  it("replays archive migrations without resetting identities, recording intent or backfill progress", async () => {
     await run(
       Effect.gen(function* () {
         yield* seed;
@@ -544,6 +544,7 @@ describe("native archive", () => {
         expect(yield* runMigrations()).toEqual([
           [142, "DurableNativeArchive"],
           [143, "NativeRecordingSessions"],
+          [144, "ProjectHistorySearch"],
         ]);
         expect(yield* sql`SELECT * FROM native_recording_sessions`).toEqual(recording);
         expect(yield* sql`SELECT * FROM durable_archive_backfill ORDER BY source_kind`).toEqual(

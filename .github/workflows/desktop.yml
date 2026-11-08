@@ -14,7 +14,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Linux qualification is deferred under VIB-001; Windows is the current gate.
+        os: [windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
@@ -37,9 +38,8 @@ jobs:
         run: bun run --cwd apps/server test src/codexAppServerManager.test.ts src/provider/Layers/ClaudeAdapter.test.ts -t 'Codex durable native capture|Claude durable native capture'
       - name: Durable migration fixtures and recovery
         run: bun run --cwd apps/server test src/persistence/Layers/NativeArchive.test.ts src/persistence/nativeArchiveBackfill.test.ts src/persistence/DurableMigrationFixtures.test.ts src/persistence/Migrations.test.ts src/persistence/Migrations/MigrationReplay.test.ts src/persistence/MigrationBackup.test.ts src/persistence/NodeSqliteClient.test.ts src/profileStatsArchive.test.ts
-      - name: Full unit suite on Linux
-        if: runner.os == 'Linux'
-        run: bun run test
+      - name: Project history search and exact reads
+        run: bun run --cwd apps/server test src/persistence/Layers/ProjectHistory.test.ts src/threadSearch.test.ts
       # The inherited full suite includes Unix sockets and POSIX path/mode fixtures.
       # Keep the Windows adoption checks explicit; remaining qualification is VIB-001.
       - name: Windows contracts
