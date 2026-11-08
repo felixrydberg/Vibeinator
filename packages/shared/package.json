@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./canonicalJson": {
+      "types": "./src/canonicalJson.ts",
+      "import": "./src/canonicalJson.ts"
+    },
     "./turnStopActivity": {
       "types": "./src/turnStopActivity.ts",
       "import": "./src/turnStopActivity.ts"

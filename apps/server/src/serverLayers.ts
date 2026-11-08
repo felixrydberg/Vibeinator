@@ -5,6 +5,7 @@ import { HubWorkRepositoryLive } from "./persistence/Layers/HubWorkRepository";
 import { ManagedAttachmentRepositoryLive } from "./persistence/Layers/ManagedAttachments";
 import { NativeArchiveRepositoryLive } from "./persistence/Layers/NativeArchive";
 import { ProjectHistoryRepositoryLive } from "./persistence/Layers/ProjectHistory";
+import { SummaryStoreRepositoryLive } from "./persistence/Layers/SummaryStore";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Layer } from "effect";
 
@@ -312,6 +313,7 @@ export function makeServerRuntimeServicesLayer(
   );
 
   return Layer.mergeAll(
+    SummaryStoreRepositoryLive,
     NativeArchiveRepositoryLive,
     agentGatewayCredentialsLayer,
     agentGatewayLayer,

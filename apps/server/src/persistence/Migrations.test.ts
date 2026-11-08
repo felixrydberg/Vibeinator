@@ -686,6 +686,7 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
         [142, "DurableNativeArchive"],
         [143, "NativeRecordingSessions"],
         [144, "ProjectHistorySearch"],
+        [145, "DurableSummaryRevisions"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -777,6 +778,7 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
           { migration_id: 142, name: "DurableNativeArchive" },
           { migration_id: 143, name: "NativeRecordingSessions" },
           { migration_id: 144, name: "ProjectHistorySearch" },
+          { migration_id: 145, name: "DurableSummaryRevisions" },
         ],
       );
       const groupConfigColumns = yield* sql<{ readonly name: string }>`
@@ -948,6 +950,7 @@ agentGatewayRetentionLegacyLayer(
           [142, "DurableNativeArchive"],
           [143, "NativeRecordingSessions"],
           [144, "ProjectHistorySearch"],
+          [145, "DurableSummaryRevisions"],
         ]);
 
         const columns = yield* sql<{ readonly name: string }>`
@@ -1082,6 +1085,7 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [142, "DurableNativeArchive"],
         [143, "NativeRecordingSessions"],
         [144, "ProjectHistorySearch"],
+        [145, "DurableSummaryRevisions"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -1157,6 +1161,7 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [142, "DurableNativeArchive"],
           [143, "NativeRecordingSessions"],
           [144, "ProjectHistorySearch"],
+          [145, "DurableSummaryRevisions"],
         ],
       );
 
@@ -1286,6 +1291,7 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [142, "DurableNativeArchive"],
         [143, "NativeRecordingSessions"],
         [144, "ProjectHistorySearch"],
+        [145, "DurableSummaryRevisions"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -1357,6 +1363,7 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [142, "DurableNativeArchive"],
           [143, "NativeRecordingSessions"],
           [144, "ProjectHistorySearch"],
+          [145, "DurableSummaryRevisions"],
         ],
       );
       const preservedSpaces = yield* sql<{ readonly spaceId: string }>`
