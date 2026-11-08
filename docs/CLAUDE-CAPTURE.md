@@ -16,7 +16,7 @@ The SDK exposes decoded objects. Capture serializes their JSON once before await
 
 Separate raw delta, snapshot and permission records are evidence, not duplicate transcript messages. The existing stream/snapshot reconciliation still owns normalized display. Native IDs are metadata, not deduplication keys. Identity uses the app project/thread, provider instance, per-query runtime UUID, lifecycle generation and ingress ordinal. Reused IDs after resume remain distinct captures. Child SDK traffic is retained by the owning root query before existing subagent routing.
 
-Fiber-local capture provenance carries `nativeCaptureId` into derived runtime events without letting concurrent permission callbacks overwrite another message's origin. Logical settlement records carry their own capture IDs. Durable normalization-link rows, replay coverage and shared pump/dispatch readiness belong to VIB-007.
+Fiber-local capture provenance carries `nativeCaptureId` into derived runtime events without letting concurrent permission callbacks overwrite another message's origin. Logical settlement records carry their own capture IDs. VIB-007 adds [durable normalization links, replay and shared pump/dispatch readiness](CAPTURE-REPLAY.md).
 
 ## Backpressure, failure and stop
 
@@ -38,7 +38,7 @@ Managed attachment files retain their existing storage, authorization and expiry
 
 Thirteen regression cases use the real Claude adapter, archive repository and SQLite with synthetic SDK input. They cover large Unicode/NUL tool results and inline images, unknown types, delta/snapshot reconciliation, native prompt capture, approval/denial/question responses, cancellation, native resume and reused IDs, credential exclusions with unchanged SDK tool input, blocked-storage stop/drain, capture failure at message/prompt/request/decision boundaries, rejection of cyclic, sparse-array and non-finite SDK values, and byte admission for oversized excluded frames. The large-payload regression fails against the merged main adapter because its capture records are missing, then passes with this integration. Existing Claude permission/process tests and Codex capture tests also exercise compatibility.
 
-No live Claude account is authenticated or invoked by these tests. Live-provider behavior, external process-tree termination, SDK-internal buffering and signed packaged behavior remain unqualified. Shared durable replay/projection guarantees remain VIB-007.
+No live Claude account is authenticated or invoked by these tests. Live-provider behavior, external process-tree termination, SDK-internal buffering and signed packaged behavior remain unqualified. See [shared failure/replay guarantees](CAPTURE-REPLAY.md) for their implementation and limits.
 
 ## VIB-006 verification (7 November 2026)
 

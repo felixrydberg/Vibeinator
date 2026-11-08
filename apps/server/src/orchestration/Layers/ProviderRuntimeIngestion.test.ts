@@ -25,6 +25,7 @@ import {
   ProjectId,
   ProviderItemId,
   RuntimeItemId,
+  RuntimeSessionId,
   RuntimeTaskId,
   ThreadId,
   TurnId,
@@ -47,6 +48,9 @@ import { OrchestrationEventStoreLive } from "../../persistence/Layers/Orchestrat
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ProviderRuntimeEventRepositoryLive } from "../../persistence/Layers/ProviderRuntimeEvents.ts";
+import { NativeArchiveRepository } from "../../persistence/Services/NativeArchive.ts";
+import { NativeArchiveRepositoryLive } from "../../persistence/Layers/NativeArchive.ts";
+import { NativeCaptureState, NativeCaptureStateLive } from "../../provider/nativeCaptureState.ts";
 import {
   PROVIDER_RUNTIME_INGESTION_CONSUMER,
   ProviderRuntimeEventRepository,
@@ -434,6 +438,7 @@ describe("ProviderRuntimeIngestion", () => {
     readonly startIngestion?: boolean;
     readonly autoResumeAfterUsageLimits?: boolean;
     readonly persistedStream?: boolean;
+    readonly recordingState?: boolean;
     readonly computerManager?: ComputerManager;
     readonly deviceManager?: DeviceManager;
   }) {
@@ -468,6 +473,7 @@ describe("ProviderRuntimeIngestion", () => {
           : Layer.empty,
       ),
       Layer.provideMerge(orchestrationLayer),
+      Layer.provideMerge(options?.recordingState ? NativeCaptureStateLive : Layer.empty),
       Layer.provideMerge(OrchestrationProjectionSnapshotQueryLive),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(runtimeEventRepositoryLayer),
@@ -595,6 +601,139 @@ describe("ProviderRuntimeIngestion", () => {
       readProjectedThread,
     };
   }
+
+  it("latches projection failure before publication, retains native evidence and replays linked text after repair", async () => {
+    const harness = await createHarness({
+      persistedStream: true,
+      startIngestion: false,
+      recordingState: true,
+    });
+    const sql = await runtime!.runPromise(Effect.service(SqlClient.SqlClient));
+    const state = Option.getOrThrow(
+      await runtime!.runPromise(Effect.serviceOption(NativeCaptureState)),
+    );
+    const threadId = asThreadId("thread-1");
+    const projectId = asProjectId("project-1");
+    const createdAt = new Date().toISOString();
+    await Effect.runPromise(
+      state.prepare({
+        threadId,
+        provider: "codex",
+        providerInstanceId: "codex",
+        lifecycleGeneration: "linked-generation",
+      }),
+    );
+    const source = await runtime!.runPromise(
+      Effect.gen(function* () {
+        const archive = yield* NativeArchiveRepository;
+        return yield* archive.appendCapture({
+          schemaVersion: 1,
+          identity: {
+            projectId,
+            threadId,
+            ingressOrdinal: 1,
+            session: {
+              provider: "codex",
+              providerInstanceId: "codex",
+              runtimeSessionId: RuntimeSessionId.makeUnsafe("linked-runtime"),
+              lifecycleGeneration: "linked-generation",
+            },
+          },
+          nativeSessionId: null,
+          nativeTurnId: null,
+          nativeEventId: null,
+          nativeItemId: null,
+          payloadType: "message",
+          direction: "incoming",
+          observedAt: createdAt,
+          capturePolicyVersion: 1,
+          disposition: "retained",
+          content: { encoding: "utf8-json", text: '{"text":"retained source"}' },
+        });
+      }).pipe(Effect.provide(NativeArchiveRepositoryLive)),
+    );
+    const base = {
+      provider: "codex",
+      threadId,
+      turnId: asTurnId("linked-turn"),
+      itemId: asItemId("linked-item"),
+      lifecycleGeneration: "linked-generation",
+      nativeCaptureId: source.captureId,
+      createdAt,
+    };
+    const delta: ProviderRuntimeEvent = {
+      ...base,
+      type: "content.delta",
+      eventId: asEventId("linked-delta"),
+      payload: { streamKind: "assistant_text", delta: "🙂\0日本語\r\nEND_SENTINEL" },
+    };
+    await Effect.runPromise(
+      harness.runtimeEventRepository.append({
+        ...base,
+        type: "turn.started",
+        eventId: asEventId("linked-start"),
+        payload: {},
+      }),
+    );
+    const stored = await Effect.runPromise(harness.runtimeEventRepository.append(delta));
+    expect((await Effect.runPromise(harness.runtimeEventRepository.append(delta))).sequence).toBe(
+      stored.sequence,
+    );
+    await Effect.runPromise(
+      harness.runtimeEventRepository.append({
+        ...base,
+        type: "turn.completed",
+        eventId: asEventId("linked-end"),
+        payload: { state: "completed" },
+      }),
+    );
+    const before = await Effect.runPromise(sql`SELECT COUNT(*) AS count FROM orchestration_events`);
+    await Effect.runPromise(sql`CREATE TRIGGER fail_linked_projection BEFORE INSERT ON native_normalization_links
+      BEGIN SELECT RAISE(ABORT, 'synthetic projection failure'); END`);
+    await harness.startIngestion();
+    await vi.waitFor(() => expect(state.canRecord(threadId, "linked-generation")).toBe(false));
+    expect((await Effect.runPromise(Effect.result(state.assertReady(threadId))))._tag).toBe(
+      "Failure",
+    );
+    expect(
+      await Effect.runPromise(sql`SELECT COUNT(*) AS count FROM orchestration_events`),
+    ).toEqual(before);
+    expect(
+      await Effect.runPromise(sql`SELECT COUNT(*) AS count FROM native_normalization_links`),
+    ).toEqual([{ count: 0 }]);
+    expect(await Effect.runPromise(sql`SELECT capture_id FROM native_captures`)).toEqual([
+      { capture_id: source.captureId },
+    ]);
+    await Effect.runPromise(sql`DROP TRIGGER fail_linked_projection`);
+    await waitForProjectedThread(
+      harness.readProjectedThread,
+      (thread) => thread.messages.some((message) => message.text === "🙂\0日本語\r\nEND_SENTINEL"),
+      5000,
+    );
+    await harness.drain();
+    const beforeRestart = (await harness.readProjectedThread())?.messages;
+    const linked = await Effect.runPromise(
+      sql`SELECT event_id, event_sequence FROM native_normalization_links ORDER BY event_sequence`,
+    );
+    expect(linked.length).toBeGreaterThan(0);
+    const events = Array.from(
+      await Effect.runPromise(Stream.runCollect(harness.engine.readEvents(0))),
+    );
+    expect(
+      events
+        .filter((event) => event.metadata.nativeCaptureIds?.includes(source.captureId))
+        .map((event) => event.eventId),
+    ).toEqual(linked.map((row) => row.event_id));
+    await Effect.runPromise(Scope.close(scope!, Exit.void));
+    const drain = await harness.restartIngestion();
+    await drain();
+    expect((await harness.readProjectedThread())?.messages).toEqual(beforeRestart);
+    expect(
+      await Effect.runPromise(
+        sql`SELECT event_id, event_sequence FROM native_normalization_links ORDER BY event_sequence`,
+      ),
+    ).toEqual(linked);
+  });
 
   describe("usage-limit recovery ingestion", () => {
     const bindingKey = "mock-ingestion-account-binding";

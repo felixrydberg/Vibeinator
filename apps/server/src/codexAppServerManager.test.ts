@@ -925,7 +925,8 @@ it.each(["global", "project"] as const)(
       expect(config.mcp_servers.linear_connector).toMatchObject({
         url: `${endpoint}/connectors/linear`,
       });
-      expect(config.mcp_servers.vibeinator).toBeDefined();
+      // The retained gateway's Codex MCP key is a wire name, not app branding.
+      expect(config.mcp_servers.synara).toBeDefined();
     } finally {
       await manager.stopAll();
       rmSync(cwd, { recursive: true, force: true });

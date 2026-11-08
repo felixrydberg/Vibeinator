@@ -3292,7 +3292,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       : this.teardownContextProcess(context);
     stopPromise = teardown.then(
       async () => {
-        await context.nativeCapture?.drain();
+        await context.nativeCapture?.close();
         if (this.sessions.get(threadId) === context) {
           this.sessions.delete(threadId);
         }

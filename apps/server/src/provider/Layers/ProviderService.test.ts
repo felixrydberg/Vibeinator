@@ -108,6 +108,9 @@ import {
 import { AGENT_GATEWAY_TURN_AUTHORITY_RETIRED } from "../../agentGateway/sessionLease.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
+import { NativeCaptureStateLive, NATIVE_RECORDING_FAILURE_MESSAGE } from "../nativeCaptureState.ts";
+import { ProviderRuntimeEventRepository } from "../../persistence/Services/ProviderRuntimeEvents.ts";
+import { ProviderRuntimeEventRepositoryLive } from "../../persistence/Layers/ProviderRuntimeEvents.ts";
 import { OrchestrationEventDeliveryRepositoryLive } from "../../persistence/Layers/OrchestrationEventDeliveries.ts";
 import {
   OrchestrationEventDeliveryRepository,
@@ -726,6 +729,148 @@ function makeProviderServiceLayer(
 }
 
 const routing = makeProviderServiceLayer();
+
+it.effect(
+  "stops a runtime on journal failure, blocks new work and retries storage without executing another turn",
+  () => {
+    const threadId = asThreadId("recording-failure-dispatch");
+    let journal: typeof ProviderRuntimeEventRepository.Service;
+    const fixture = makeProviderServiceLayer({
+      persistRuntimeEvent: (event) => journal.append(event),
+      runtimeEventRetryBaseDelayMs: 10,
+      runtimeEventRetryMaxDelayMs: 20,
+    });
+    const recordingLayer = fixture.rawLayer.pipe(
+      Layer.provideMerge(ProviderRuntimeEventRepositoryLive),
+      Layer.provideMerge(NativeCaptureStateLive),
+      Layer.provideMerge(SqlitePersistenceMemory),
+    );
+    return Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ProviderRuntimeEventRepository;
+      journal = repository;
+      yield* sql`INSERT INTO projection_projects(project_id, title, workspace_root, scripts_json, created_at, updated_at)
+      VALUES ('recording-project', 'Synthetic', '/synthetic', '[]', '2026-11-07', '2026-11-07')`;
+      yield* sql`INSERT INTO projection_threads(thread_id, project_id, title, created_at, updated_at)
+      VALUES (${threadId}, 'recording-project', 'Synthetic', '2026-11-07', '2026-11-07')`;
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: "codex",
+        runtimeMode: "full-access",
+      });
+      yield* provider.sendTurn({ threadId, input: "execute once" });
+      yield* fixture.codex.waitForRuntimeSubscribers();
+      yield* sql`PRAGMA query_only = ON`;
+      fixture.codex.emit({
+        type: "content.delta",
+        eventId: EventId.makeUnsafe("recording-failed-text"),
+        threadId,
+        provider: "codex",
+        createdAt: "2026-11-07T00:00:00.000Z",
+        payload: { streamKind: "assistant_text", delta: "last incoming text" },
+      });
+      yield* waitUntil(() => fixture.codex.stopSession.mock.calls.length === 1, 3000);
+      for (const effect of [
+        provider.sendTurn({ threadId, input: "blocked" }),
+        provider.steerTurn({ threadId, input: "blocked" }),
+      ]) {
+        const result = yield* Effect.result(effect);
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure")
+          assert.include(JSON.stringify(result.failure), NATIVE_RECORDING_FAILURE_MESSAGE);
+      }
+      assert.equal(fixture.codex.sendTurn.mock.calls.length, 1);
+      assert.equal(fixture.codex.steerTurn.mock.calls.length, 0);
+      yield* sql`PRAGMA query_only = OFF`;
+      yield* TestClock.adjust("1 second");
+      yield* waitUntilEffect(
+        () => repository.getHighWaterSequence.pipe(Effect.map((sequence) => sequence >= 2)),
+        3000,
+      );
+      const rows = yield* repository.readAfter({
+        sequenceExclusive: 0,
+        throughSequenceInclusive: yield* repository.getHighWaterSequence,
+        limit: 20,
+      });
+      assert.equal(rows.filter((row) => row.event.eventId === "recording-failed-text").length, 1);
+      assert.equal(rows.filter((row) => row.event.type === "runtime.error").length, 1);
+      assert.equal(fixture.codex.sendTurn.mock.calls.length, 1);
+      assert.equal(fixture.codex.startSession.mock.calls.length, 1);
+      yield* provider.stopSession({ threadId });
+    }).pipe(Effect.provide(recordingLayer));
+  },
+);
+
+it.effect(
+  "publishes the exact journal preview and preserves every assistant text character through large-event replay",
+  () => {
+    let journal: typeof ProviderRuntimeEventRepository.Service;
+    const fixture = makeProviderServiceLayer({
+      persistRuntimeEvent: (event) => journal.append(event),
+    });
+    return Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const repository = yield* ProviderRuntimeEventRepository;
+      journal = repository;
+      const live: ProviderRuntimeEvent[] = [];
+      const threadId = asThreadId("recording-large-text");
+      const text =
+        "a".repeat(256 * 1024 - 1) + "🙂\0日本語\r\n".repeat(210_000) + "\ud800END_SENTINEL";
+      yield* provider.streamEvents.pipe(
+        Stream.runForEach((event) =>
+          Effect.sync(() => {
+            live.push(event);
+          }),
+        ),
+        Effect.forkChild,
+      );
+      yield* fixture.codex.waitForRuntimeSubscribers();
+      fixture.codex.emit({
+        type: "content.delta",
+        eventId: EventId.makeUnsafe("large-text"),
+        threadId,
+        provider: "codex",
+        createdAt: "2026-11-07T00:00:00.000Z",
+        payload: { streamKind: "assistant_text", delta: text },
+      });
+      const tool: ProviderRuntimeEvent = {
+        type: "item.completed",
+        eventId: EventId.makeUnsafe("large-tool"),
+        threadId,
+        provider: "codex",
+        createdAt: "2026-11-07T00:00:01.000Z",
+        payload: {
+          itemType: "command_execution",
+          status: "completed",
+          data: { output: "output".repeat(500_000) },
+        },
+      };
+      fixture.codex.emit(tool);
+      yield* waitUntil(() => live.some((event) => event.eventId === tool.eventId), 5000);
+      const replay = (yield* repository.readAfter({
+        sequenceExclusive: 0,
+        throughSequenceInclusive: yield* repository.getHighWaterSequence,
+        limit: 1000,
+      })).map((row) => row.event);
+      assert.deepEqual(live, replay);
+      assert.equal(
+        replay
+          .flatMap((event) => (event.type === "content.delta" ? [event.payload.delta] : []))
+          .join(""),
+        text,
+      );
+      assert.isBelow(JSON.stringify(replay.at(-1)).length, 70_000);
+    }).pipe(
+      Effect.provide(
+        fixture.rawLayer.pipe(
+          Layer.provideMerge(ProviderRuntimeEventRepositoryLive),
+          Layer.provideMerge(SqlitePersistenceMemory),
+        ),
+      ),
+    );
+  },
+);
 const replacementEvents = new Map<string, ProviderRuntimeEvent>();
 const replacementRouting = makeProviderServiceLayer({
   persistRuntimeEvent: (event) =>

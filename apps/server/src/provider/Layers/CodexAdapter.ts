@@ -111,6 +111,7 @@ import {
 } from "../unmappedProviderEvents.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import type { CodexNativeCaptureFactory } from "../codexNativeCapture.ts";
+import { NativeCaptureState } from "../nativeCaptureState.ts";
 
 const PROVIDER = "codex" as const;
 const CODEX_RUNTIME_WARNING_METHODS = new Set(["guardianWarning", "warning"]);
@@ -2114,6 +2115,7 @@ function mapToRuntimeEvents(
 const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
   Effect.gen(function* () {
     const serverConfig = yield* Effect.service(ServerConfig);
+    const captureState = Option.getOrUndefined(yield* Effect.serviceOption(NativeCaptureState));
     // Optional so adapter tests can run without the gateway layer; when
     // present, every session gets the synara_* MCP tools.
     const agentGatewayCredentials = Option.getOrUndefined(
@@ -2790,6 +2792,14 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
             terminalReserve: PROVIDER_RUNTIME_CALLBACK_TERMINAL_RESERVE,
             isTerminal: (item) => item.runtimeEvents.some(isTerminalProviderRuntimeEvent),
             sizeOf: (item) => item.bytes,
+            onDiscard: (item) =>
+              captureState?.fail({
+                threadId: item.nativeEvent.threadId,
+                generation: item.nativeEvent.lifecycleGeneration ?? "unscoped",
+                provider: PROVIDER,
+                instanceId: item.nativeEvent.providerInstanceId ?? PROVIDER,
+                reason: "overflow",
+              }),
           },
         );
         const usageLimitContexts = new WeakMap<object, CodexUsageLimitContext>();

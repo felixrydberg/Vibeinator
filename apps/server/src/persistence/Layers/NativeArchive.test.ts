@@ -10,6 +10,9 @@ import { Deferred, Effect, Fiber, Schema, Stream } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   EventId,
+  NativeCaptureId,
+  ProviderInstanceId,
+  type ProviderRuntimeEvent,
   NativeCaptureIdentity,
   NativeNormalizationLink,
   ProjectId,
@@ -98,6 +101,62 @@ const counts = Effect.gen(function* () {
 });
 
 describe("native archive", () => {
+  it("keeps bounded tool previews linked to full content and rejects foreign or missing runtime provenance", async () => {
+    await run(
+      Effect.gen(function* () {
+        yield* seed;
+        const archive = yield* NativeArchiveRepository;
+        const runtime = yield* ProviderRuntimeEventRepository;
+        const output = "🙂\0日本語\r\n".repeat(250_000) + "END_SENTINEL";
+        const source = yield* archive.appendCapture(capture(JSON.stringify({ output })));
+        const event: ProviderRuntimeEvent = {
+          type: "item.completed",
+          eventId: EventId.makeUnsafe("native-tool-preview"),
+          threadId: scope.threadId,
+          provider: "codex",
+          providerInstanceId: ProviderInstanceId.makeUnsafe("codex_work"),
+          lifecycleGeneration: "generation-1",
+          nativeCaptureId: source.captureId,
+          createdAt: timestamp,
+          payload: { itemType: "command_execution", status: "completed", data: { output } },
+        };
+        const stored = yield* runtime.append(event);
+        const duplicate = yield* runtime.append(event);
+        expect(duplicate.sequence).toBe(stored.sequence);
+        const replay = yield* runtime.readAfter({
+          sequenceExclusive: 0,
+          throughSequenceInclusive: stored.sequence,
+          limit: 10,
+        });
+        expect(replay.map((row) => row.event)).toEqual([stored.event]);
+        expect(Buffer.byteLength(JSON.stringify(stored.event))).toBeLessThan(128 * 1024);
+        expect(stored.event.nativeCaptureId).toBe(source.captureId);
+        if (source.disposition !== "retained") throw new Error("Retained source expected");
+        expect(
+          JSON.parse((yield* bytesFor(source.payload.payloadId)).toString("utf8")).output,
+        ).toBe(output);
+        const invalid = [
+          { threadId: ThreadId.makeUnsafe("thread-2") },
+          { provider: "claudeAgent" },
+          { providerInstanceId: ProviderInstanceId.makeUnsafe("another-instance") },
+          { lifecycleGeneration: "other-generation" },
+          { nativeCaptureId: NativeCaptureId.makeUnsafe("missing-source") },
+        ];
+        for (const [index, change] of invalid.entries()) {
+          const rejected = yield* Effect.flip(
+            runtime.append({
+              ...event,
+              ...change,
+              eventId: EventId.makeUnsafe(`invalid-source-${index}`),
+            }),
+          );
+          expect(rejected._tag).toBe("PersistenceDecodeError");
+        }
+        expect(yield* runtime.getHighWaterSequence).toBe(stored.sequence);
+      }).pipe(Effect.provide(ProviderRuntimeEventRepositoryLive)),
+    );
+  });
+
   it("reconstructs large text and JSON byte-for-byte through bounded pages, including NUL and split Unicode", async () => {
     await run(
       Effect.gen(function* () {
@@ -468,7 +527,7 @@ describe("native archive", () => {
     );
   });
 
-  it("replays migration 142 without resetting archive identities, content or backfill progress", async () => {
+  it("replays migrations 142/143 without resetting archive identities, recording intent or backfill progress", async () => {
     await run(
       Effect.gen(function* () {
         yield* seed;
@@ -478,8 +537,15 @@ describe("native archive", () => {
         if (stored.disposition !== "retained") throw new Error("Expected retained capture");
         yield* sql`UPDATE durable_archive_backfill SET cursor = through_row, completed = 1`;
         const progress = yield* sql`SELECT * FROM durable_archive_backfill ORDER BY source_kind`;
-        yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 142`;
-        expect(yield* runMigrations()).toEqual([[142, "DurableNativeArchive"]]);
+        yield* sql`INSERT INTO native_recording_sessions(thread_id, lifecycle_generation, provider, provider_instance_id, phase, created_at, updated_at)
+          VALUES (${scope.threadId}, 'generation-1', 'codex', 'codex_work', 'starting', ${timestamp}, ${timestamp})`;
+        const recording = yield* sql`SELECT * FROM native_recording_sessions`;
+        yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 142`;
+        expect(yield* runMigrations()).toEqual([
+          [142, "DurableNativeArchive"],
+          [143, "NativeRecordingSessions"],
+        ]);
+        expect(yield* sql`SELECT * FROM native_recording_sessions`).toEqual(recording);
         expect(yield* sql`SELECT * FROM durable_archive_backfill ORDER BY source_kind`).toEqual(
           progress,
         );

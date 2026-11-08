@@ -2084,7 +2084,8 @@ export class CuaDriverHost {
           this.options.nativeRevision === undefined
             ? CUA_NATIVE_REVISION
             : this.options.nativeRevision;
-        const reportedRevision = metadata?.result?.vibeinator_native_revision;
+        // Wire names belong to the retained native patches, not the app identity.
+        const reportedRevision = metadata?.result?.synara_native_revision;
         if (
           !metadata?.ok ||
           metadata.result?.driver_version !== CUA_DRIVER_VERSION ||
@@ -2100,7 +2101,7 @@ export class CuaDriverHost {
         generation.browserInputControl =
           process.platform === "linux" &&
           reportedRevision === CUA_NATIVE_REVISION &&
-          metadata.result?.vibeinator_browser_input_control === 1;
+          metadata.result?.synara_browser_input_control === 1;
         if (generation.retired || generation.didExit)
           throw new Error("Cua Driver stopped during startup.");
         generation.cancellationReady =

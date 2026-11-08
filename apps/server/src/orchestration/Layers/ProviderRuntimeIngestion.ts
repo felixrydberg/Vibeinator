@@ -29,6 +29,7 @@ import {
   Deferred,
   Duration,
   Effect,
+  Exit,
   Layer,
   Option,
   Queue,
@@ -36,6 +37,8 @@ import {
   Stream,
 } from "effect";
 import * as Semaphore from "effect/Semaphore";
+import { NativeNormalizationOrigin } from "../../persistence/Services/NativeArchive.ts";
+import { NativeCaptureState } from "../../provider/nativeCaptureState.ts";
 import { makeDrainableWorker, startDrainableWorkerProducers } from "@synara/shared/DrainableWorker";
 import { isGroupContainerKind } from "@synara/shared/projectContainers";
 import { providerSupportsNativeTurnSteering } from "@synara/shared/providerMetadata";
@@ -849,6 +852,7 @@ const make = Effect.gen(function* () {
   const gitCore = yield* GitCore;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  const captureState = Option.getOrUndefined(yield* Effect.serviceOption(NativeCaptureState));
   const computerService = yield* Effect.serviceOption(ComputerService);
   const deviceService = yield* Effect.serviceOption(DeviceService);
   const recoverySettings = yield* Effect.serviceOption(ServerSettingsService);
@@ -4182,6 +4186,28 @@ const make = Effect.gen(function* () {
   const processInput = (input: RuntimeIngestionInput) =>
     input.source === "runtime"
       ? processRuntimeEvent(input.event, input.sequence, input.suppressProgressActivity).pipe(
+          (effect) =>
+            input.event.nativeCaptureId
+              ? effect.pipe(
+                  Effect.provideService(NativeNormalizationOrigin, {
+                    captureIds: [input.event.nativeCaptureId],
+                    ownerThreadId: input.event.threadId,
+                  }),
+                )
+              : effect,
+          Effect.onExit((exit) =>
+            Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)
+              ? Effect.sync(() => {
+                  captureState?.fail({
+                    threadId: input.event.threadId,
+                    generation: input.event.lifecycleGeneration ?? "unscoped",
+                    provider: input.event.provider,
+                    instanceId: input.event.providerInstanceId ?? input.event.provider,
+                    reason: "projection",
+                  });
+                })
+              : Effect.void,
+          ),
           Effect.andThen(
             Effect.sync(() => {
               pendingAckedSequence = Math.max(pendingAckedSequence ?? 0, input.sequence);

@@ -28,6 +28,7 @@ import * as NodeSqliteClient from "../../persistence/NodeSqliteClient.ts";
 import { runMigrations } from "../../persistence/Migrations.ts";
 import { NativeArchiveRepository } from "../../persistence/Services/NativeArchive.ts";
 import { NativeArchiveRepositoryLive } from "../../persistence/Layers/NativeArchive.ts";
+import { NativeCaptureState, NativeCaptureStateLive } from "../nativeCaptureState.ts";
 import {
   makeClaudeNativeCapture,
   type ClaudeNativeCaptureFactory,
@@ -561,7 +562,11 @@ describe("Claude durable native capture", () => {
     ) => Effect.Effect<
       void,
       E,
-      ClaudeAdapter | NativeArchiveRepository | SqlClient.SqlClient | import("effect").Scope.Scope
+      | ClaudeAdapter
+      | NativeArchiveRepository
+      | NativeCaptureState
+      | SqlClient.SqlClient
+      | import("effect").Scope.Scope
     >,
   ) => {
     const root = mkdtempSync(path.join(os.tmpdir(), "vibeinator-claude-capture-"));
@@ -575,9 +580,11 @@ describe("Claude durable native capture", () => {
           VALUES (${scope.projectId}, 'Synthetic', ${root}, '[]', ${timestamp}, ${timestamp})`;
           yield* sql`INSERT INTO projection_threads(thread_id, project_id, title, created_at, updated_at)
           VALUES (${scope.threadId}, ${scope.projectId}, 'Synthetic', ${timestamp}, ${timestamp})`;
-          const nativeCapture = yield* makeClaudeNativeCapture;
-          const harness = makeMultiQueryHarness({ baseDir: root, nativeCapture });
-          yield* program(harness, root).pipe(Effect.provide(harness.layer));
+          yield* Effect.gen(function* () {
+            const nativeCapture = yield* makeClaudeNativeCapture;
+            const harness = makeMultiQueryHarness({ baseDir: root, nativeCapture });
+            yield* program(harness, root).pipe(Effect.provide(harness.layer));
+          }).pipe(Effect.provide(NativeCaptureStateLive));
         }).pipe(
           Effect.provide(NativeArchiveRepositoryLive),
           Effect.provide(NodeSqliteClient.layerMemory()),
@@ -647,6 +654,94 @@ describe("Claude durable native capture", () => {
   });
   const waitFor = (predicate: () => boolean) =>
     Effect.promise(() => vi.waitFor(() => assert.equal(predicate(), true), { timeout: 3000 }));
+
+  it("starts physical retirement before a full event queue can publish turn cancellation", async () => {
+    const bounded = Queue.bounded;
+    const offer = Queue.offer;
+    let pendingOffers = 0;
+    const queueBudget = vi
+      .spyOn(Queue, "bounded")
+      .mockImplementation((capacity) => bounded(capacity === 2048 ? 8 : capacity));
+    const offers = vi.spyOn(Queue, "offer").mockImplementation((queue, event) =>
+      Effect.suspend(() => {
+        pendingOffers++;
+        return offer(queue, event).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              pendingOffers--;
+            }),
+          ),
+        );
+      }),
+    );
+    try {
+      await run((harness, root) =>
+        Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const consumer = yield* adapter.streamEvents.pipe(Stream.runDrain, Effect.forkChild);
+          yield* start(root);
+          yield* adapter.sendTurn({
+            threadId: scope.threadId,
+            input: "synthetic prompt",
+            attachments: [],
+          });
+          yield* Effect.yieldNow;
+          yield* Fiber.interrupt(consumer);
+          const query = harness.queries[0]!;
+          query.emit({
+            type: "stream_event",
+            uuid: "message-start",
+            session_id: "native",
+            parent_tool_use_id: null,
+            event: { type: "message_start", message: { id: "pressure-message" } },
+          } as unknown as SDKMessage);
+          query.emit({
+            type: "stream_event",
+            uuid: "block-start",
+            session_id: "native",
+            parent_tool_use_id: null,
+            event: {
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "text", text: "" },
+            },
+          } as unknown as SDKMessage);
+          for (let index = 0; index < 30; index++)
+            query.emit({
+              type: "stream_event",
+              uuid: `pressure-${index}`,
+              session_id: "native",
+              parent_tool_use_id: null,
+              event: {
+                type: "content_block_delta",
+                index: 0,
+                delta: { type: "text_delta", text: "text" },
+              },
+            } as SDKMessage);
+          yield* waitFor(() => pendingOffers > 0);
+          const state = yield* NativeCaptureState;
+          state.fail({
+            threadId: scope.threadId,
+            generation: "generation-1",
+            provider: "claudeAgent",
+            instanceId: "claudeAgent",
+            reason: "journal",
+          });
+          const stopping = yield* adapter.stopSession(scope.threadId).pipe(Effect.forkChild);
+          try {
+            yield* waitFor(() => query.closeCalls > 0);
+          } finally {
+            yield* collect;
+            yield* Fiber.join(stopping);
+          }
+          assert.equal(yield* adapter.hasSession(scope.threadId), false);
+        }),
+      );
+    } finally {
+      queueBudget.mockRestore();
+      offers.mockRestore();
+    }
+  });
 
   it("retains decoded SDK messages, full tool/image content and unknown types before diagnostic shaping", async () => {
     await run((harness, root) =>

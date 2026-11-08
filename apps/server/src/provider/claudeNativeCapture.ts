@@ -1,4 +1,5 @@
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
+import { NativeCaptureState } from "./nativeCaptureState.ts";
 import type { NativeCaptureId } from "@synara/contracts";
 import { isSensitiveKey, redactSensitiveJsonFields } from "../sensitiveKeys.ts";
 import { makeNativeCapture, type NativeCaptureOwner } from "./nativeCapture.ts";
@@ -89,6 +90,7 @@ export interface ClaudeCaptureFrame {
   readonly nativeItemId?: string | undefined;
 }
 export interface ClaudeNativeCaptureLane {
+  readonly close: () => Promise<void>;
   readonly record: (frame: ClaudeCaptureFrame) => Promise<NativeCaptureId>;
   readonly drain: () => Promise<void>;
 }
@@ -98,10 +100,20 @@ export type ClaudeNativeCaptureFactory = (
 
 export const makeClaudeNativeCapture = Effect.gen(function* () {
   const makeLane = yield* makeNativeCapture;
+  const state = Option.getOrUndefined(yield* Effect.serviceOption(NativeCaptureState));
   return ((owner) => {
     const lane = makeLane({ ...owner, provider: "claudeAgent" });
     let failed = false;
+    const noteFailure = () =>
+      state?.fail({
+        threadId: owner.threadId,
+        generation: owner.lifecycleGeneration,
+        provider: "claudeAgent",
+        instanceId: owner.providerInstanceId,
+        reason: "capture",
+      });
     return {
+      close: lane.close,
       drain: lane.drain,
       record: (frame) => {
         try {
@@ -141,10 +153,12 @@ export const makeClaudeNativeCapture = Effect.gen(function* () {
             )
             .catch(() => {
               failed = true;
+              noteFailure();
               throw new Error("Claude native capture failed; recording stopped.");
             });
         } catch {
           failed = true;
+          noteFailure();
           return Promise.reject(new Error("Claude native capture failed; recording stopped."));
         }
       },

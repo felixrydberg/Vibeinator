@@ -53,7 +53,7 @@ jobs:
         run: bun run test --filter=@synara/scripts -- desktop-artifact-identity.test.ts desktop-publish-config.test.ts build-desktop-artifact-mac-config.test.ts dev-runner.test.ts i18n.test.ts verify-packaged-desktop-startup.test.ts
       - name: Windows desktop boundaries
         if: runner.os == 'Windows'
-        run: bun run test --filter=@synara/desktop -- betaChannel.test.ts betaInstaller.test.ts source-desktop-launch.test.mjs clipboardPermissions.test.ts mediaPermissions.test.ts desktopStaticProtocol.test.ts subframeNavigationGuard.test.ts backendShutdown.windows.integration.test.ts
+        run: bun run test --filter=@synara/desktop -- betaChannel.test.ts betaInstaller.test.ts source-desktop-launch.test.mjs smoke-test.test.mjs clipboardPermissions.test.ts mediaPermissions.test.ts desktopStaticProtocol.test.ts subframeNavigationGuard.test.ts backendShutdown.windows.integration.test.ts
       - name: Windows backend homes
         if: runner.os == 'Windows'
         run: bun run test --filter=@synara/cli -- codexHomePaths.test.ts providerChildEnvironment.test.ts

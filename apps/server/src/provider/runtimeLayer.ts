@@ -30,14 +30,17 @@ import { ProviderRuntimeEventRepositoryLive } from "../persistence/Layers/Provid
 import { NativeArchiveRepositoryLive } from "../persistence/Layers/NativeArchive";
 import { makeCodexNativeCapture } from "./codexNativeCapture";
 import { makeClaudeNativeCapture } from "./claudeNativeCapture";
+import { NativeCaptureState, NativeCaptureStateLive } from "./nativeCaptureState";
 
 export function makeServerProviderLayer(
   options: {
     readonly agentGatewayCredentialsLayer?: typeof AgentGatewayCredentialsWithSecretsLive;
+    readonly nativeCaptureStateLayer?: typeof NativeCaptureStateLive;
   } = {},
 ) {
   return Effect.gen(function* () {
     const credentials = yield* ProviderCredentials;
+    const nativeCaptureState = yield* NativeCaptureState;
     const serverSettings = yield* ServerSettingsService;
     const resolveProviderServerPassword = makeProviderServerPasswordResolver(credentials);
     const { logProviderEvents, providerEventLogPath } = yield* ServerConfig;
@@ -133,10 +136,11 @@ export function makeServerProviderLayer(
       providerDiscoveryLayer,
       adapterRegistryLayer,
       providerSessionDirectoryLayer,
-    );
+    ).pipe(Layer.provide(Layer.succeed(NativeCaptureState, nativeCaptureState)));
   }).pipe(
     Effect.provide(ProviderCredentialsLive.pipe(Layer.orDie)),
     Effect.provide(NativeArchiveRepositoryLive),
     Layer.unwrap,
+    Layer.provideMerge(options.nativeCaptureStateLayer ?? NativeCaptureStateLive),
   );
 }

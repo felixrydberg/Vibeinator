@@ -34,6 +34,8 @@ const DEFAULT_RETRY_MAX_DELAY_MS = 2_000;
 const DEFAULT_DEGRADED_HEAL_AFTER_SUCCESSES = 100;
 
 export interface ProviderRuntimeEventPumpOptions<R> {
+  readonly onProcessingFailure?: (event: ProviderRuntimeEvent) => void;
+  readonly failureDetail?: string;
   readonly provider: ProviderKind;
   readonly stream: Stream.Stream<ProviderRuntimeEvent>;
   readonly processEvent: (event: ProviderRuntimeEvent) => Effect.Effect<void, unknown, R>;
@@ -198,7 +200,7 @@ export function runProviderRuntimeEventPump<R>(
             return Effect.interrupt;
           }
           const delayMs = retryDelayMs(attempt, retryBaseDelayMs, retryMaxDelayMs);
-          const quarantineDetail = Cause.pretty(cause);
+          const quarantineDetail = options.failureDetail ?? Cause.pretty(cause);
           return setHealth("recovering", attempt, quarantineDetail).pipe(
             Effect.andThen(
               Effect.logWarning("provider.runtime_event_pump.retrying_quarantine", {
@@ -242,7 +244,8 @@ export function runProviderRuntimeEventPump<R>(
             return Effect.interrupt;
           }
 
-          const detail = Cause.pretty(cause);
+          options.onProcessingFailure?.(event);
+          const detail = options.failureDetail ?? Cause.pretty(cause);
           if (options.isPermanentFailure?.(cause) === true) {
             return persistQuarantineReliably(event, detail).pipe(
               Effect.andThen(

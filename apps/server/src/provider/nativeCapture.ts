@@ -5,7 +5,8 @@ import {
   type ProviderDriverKind,
   type ThreadId,
 } from "@synara/contracts";
-import { Effect, ServiceMap } from "effect";
+import { Effect, Option, ServiceMap } from "effect";
+import { NativeCaptureState } from "./nativeCaptureState.ts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   NativeArchiveRepository,
@@ -23,6 +24,7 @@ export type NativeCaptureFrame =
   | Omit<Extract<AppendNativeCapture, { disposition: "retained" }>, "identity" | "observedAt">
   | Omit<Extract<AppendNativeCapture, { disposition: "excluded" }>, "identity" | "observedAt">;
 export interface NativeCaptureLane {
+  readonly close: () => Promise<void>;
   readonly record: (frame: NativeCaptureFrame, observedBytes?: number) => Promise<NativeCaptureId>;
   readonly drain: () => Promise<void>;
   readonly pending: () => number;
@@ -38,26 +40,49 @@ export class NativeCaptureOrigin extends ServiceMap.Service<NativeCaptureOrigin,
 export const makeNativeCapture = Effect.gen(function* () {
   const archive = yield* NativeArchiveRepository;
   const sql = yield* SqlClient.SqlClient;
+  const state = Option.getOrUndefined(yield* Effect.serviceOption(NativeCaptureState));
   return ((owner) => {
     let ordinal = 0;
     let pendingCount = 0;
     let pendingBytes = 0;
     let failed = false;
+    let closed = false;
+    let observed = false;
     let tail = Promise.resolve();
     let projectId: ProjectId | undefined;
     const captureError = () =>
       new Error(
         `${owner.provider === "codex" ? "Codex" : owner.provider === "claudeAgent" ? "Claude" : owner.provider} native capture failed; recording stopped.`,
       );
+    const noteFailure = () =>
+      state?.fail({
+        threadId: owner.threadId,
+        generation: owner.lifecycleGeneration,
+        provider: owner.provider,
+        instanceId: owner.providerInstanceId,
+        reason: "capture",
+      });
     return {
       pending: () => pendingCount,
       drain: () => tail,
+      close: async () => {
+        closed = true;
+        await tail;
+        if (state) await Effect.runPromise(state.close(owner.threadId, owner.lifecycleGeneration));
+      },
       record: (frame: NativeCaptureFrame, observedBytes?: number) => {
         const bytes =
           observedBytes ??
           (frame.disposition === "retained" ? Buffer.byteLength(frame.content.text, "utf8") : 0);
-        if (failed || pendingCount >= 256 || pendingBytes + bytes > 32 * 1024 * 1024) {
+        if (
+          failed ||
+          closed ||
+          (state && !state.canRecord(owner.threadId, owner.lifecycleGeneration)) ||
+          pendingCount >= 256 ||
+          pendingBytes + bytes > 32 * 1024 * 1024
+        ) {
           failed = true;
+          if (!closed) noteFailure();
           return Promise.reject(captureError());
         }
         const ingressOrdinal = ++ordinal;
@@ -70,12 +95,19 @@ export const makeNativeCapture = Effect.gen(function* () {
             const remainingMs = 5_000 - (Date.now() - observedAtMs);
             if (failed || remainingMs <= 0) {
               failed = true;
+              noteFailure();
               throw captureError();
             }
             const controller = new AbortController();
             let timer: ReturnType<typeof setTimeout> | undefined;
             try {
               const write = Effect.gen(function* () {
+                if (state && !observed) {
+                  yield* state.observe(owner);
+                  observed = true;
+                }
+                if (state && !state.canRecord(owner.threadId, owner.lifecycleGeneration))
+                  return yield* Effect.fail(captureError());
                 if (projectId === undefined) {
                   const rows = yield* sql<{
                     projectId: string;
@@ -114,6 +146,7 @@ export const makeNativeCapture = Effect.gen(function* () {
               return result.captureId;
             } catch {
               failed = true;
+              noteFailure();
               throw captureError();
             } finally {
               if (timer !== undefined) clearTimeout(timer);

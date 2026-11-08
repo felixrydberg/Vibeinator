@@ -1,10 +1,13 @@
 import type {
   ChatAttachment,
+  NativeCaptureId,
+  MessageId,
   OrchestrationEvent,
   OrchestrationReadModel,
   ProjectId,
   SpaceId,
   ThreadId,
+  TurnId,
 } from "@synara/contracts";
 import { OrchestrationCommand, ORCHESTRATION_WS_METHODS } from "@synara/contracts";
 import { makeKeyedDrainableWorker } from "@synara/shared/KeyedDrainableWorker";
@@ -33,6 +36,11 @@ import {
   type PersistenceSqlError,
 } from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
+import {
+  NativeArchiveRepository,
+  NativeNormalizationOrigin,
+} from "../../persistence/Services/NativeArchive.ts";
+import { NativeArchiveRepositoryLive } from "../../persistence/Layers/NativeArchive.ts";
 import {
   OrchestrationCommandReceiptRepository,
   type OrchestrationCommandReceipt,
@@ -130,6 +138,10 @@ function commandAttachmentClaim(command: OrchestrationCommand): {
 }
 
 interface CommandEnvelope {
+  nativeSource?: {
+    readonly captureIds: ReadonlyArray<NativeCaptureId>;
+    readonly ownerThreadId: ThreadId;
+  };
   command: OrchestrationCommand;
   settleOnly: boolean;
   attachmentPrincipal: ManagedAttachmentPrincipal;
@@ -195,6 +207,7 @@ function isShellMetadataEvent(event: OrchestrationEvent): event is ShellMetadata
 
 const makeOrchestrationEngine = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const nativeArchive = yield* NativeArchiveRepository;
   const eventStore = yield* OrchestrationEventStore;
   const commandReceiptRepository = yield* OrchestrationCommandReceiptRepository;
   const managedAttachments = yield* ManagedAttachmentRepository;
@@ -1307,19 +1320,65 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 `)[0]?.sequence ?? 0)
               : undefined;
             for (const nextEvent of eventBases) {
-              const savedEvent = yield* eventStore.append(
-                checkpointRuntimeSequence === undefined
-                  ? nextEvent
-                  : {
-                      ...nextEvent,
-                      metadata: { ...nextEvent.metadata, checkpointRuntimeSequence },
-                    },
-              );
+              const savedEvent = yield* eventStore.append({
+                ...nextEvent,
+                metadata: {
+                  ...nextEvent.metadata,
+                  ...(checkpointRuntimeSequence === undefined ? {} : { checkpointRuntimeSequence }),
+                  ...(envelope.nativeSource
+                    ? { nativeCaptureIds: envelope.nativeSource.captureIds }
+                    : {}),
+                },
+              });
               nextCommandReadModel = yield* projectEvent(nextCommandReadModel, savedEvent);
               if (isShellMetadataEvent(savedEvent)) {
                 yield* projectionPipeline.projectMetadataEvent(savedEvent);
               } else {
                 yield* projectionPipeline.projectHotEventInCurrentTransaction(savedEvent);
+              }
+              if (envelope.nativeSource && savedEvent.aggregateKind === "thread") {
+                for (const captureId of envelope.nativeSource.captureIds) {
+                  const sources = yield* sql<{
+                    projectId: string;
+                  }>`SELECT project_id AS "projectId" FROM native_captures
+                    WHERE capture_id = ${captureId} AND thread_id = ${envelope.nativeSource.ownerThreadId}`.pipe(
+                    Effect.mapError(toPersistenceSqlError("OrchestrationEngine.nativeSource")),
+                  );
+                  if (!sources[0])
+                    return yield* new OrchestrationCommandInvariantError({
+                      commandType: command.type,
+                      detail: "Native capture source is unavailable.",
+                    });
+                  yield* nativeArchive
+                    .linkNormalization({
+                      projectId: sources[0].projectId as ProjectId,
+                      threadId: envelope.nativeSource.ownerThreadId,
+                      link: {
+                        captureId,
+                        eventId: savedEvent.eventId,
+                        eventSequence: savedEvent.sequence,
+                        threadId: savedEvent.aggregateId as ThreadId,
+                        turnId:
+                          "turnId" in savedEvent.payload
+                            ? ((savedEvent.payload.turnId as TurnId | null) ?? null)
+                            : null,
+                        messageId:
+                          "messageId" in savedEvent.payload
+                            ? ((savedEvent.payload.messageId as MessageId | null) ?? null)
+                            : null,
+                      },
+                    })
+                    .pipe(
+                      Effect.catchTag("NativeArchiveError", () =>
+                        Effect.fail(
+                          new OrchestrationCommandInvariantError({
+                            commandType: command.type,
+                            detail: "Native capture could not be linked to the saved event.",
+                          }),
+                        ),
+                      ),
+                    );
+                }
               }
               committedEvents.push(savedEvent);
             }
@@ -1792,9 +1851,13 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
   const dispatch: OrchestrationEngineShape["dispatch"] = (command, context) =>
     Effect.gen(function* () {
+      const nativeSource = Option.getOrUndefined(
+        yield* Effect.serviceOption(NativeNormalizationOrigin),
+      );
       const result = yield* Deferred.make<{ sequence: number }, OrchestrationDispatchError>();
       const executionState = yield* Ref.make<CommandExecutionState>("queued");
       const envelope: CommandEnvelope = {
+        ...(nativeSource ? { nativeSource } : {}),
         command,
         settleOnly: context?.settleOnly === true,
         attachmentPrincipal: context?.attachmentPrincipal ?? LOCAL_LOOPBACK_ATTACHMENT_PRINCIPAL,
@@ -2118,6 +2181,7 @@ export const OrchestrationEngineLive = Layer.effect(
   OrchestrationEngineService,
   makeOrchestrationEngine,
 ).pipe(
+  Layer.provide(NativeArchiveRepositoryLive),
   Layer.provide(ProjectionThreadMessageRepositoryLive),
   Layer.provideMerge(ManagedAttachmentRepositoryLive),
 );

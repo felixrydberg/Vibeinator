@@ -60,6 +60,7 @@ export interface CodexNativeCaptureFrame {
   readonly sensitiveResponse?: boolean | undefined;
 }
 export interface CodexNativeCaptureLane {
+  readonly close: () => Promise<void>;
   readonly record: (frame: CodexNativeCaptureFrame) => Promise<NativeCaptureId>;
   readonly drain: () => Promise<void>;
   readonly pending: () => number;
@@ -80,6 +81,7 @@ export const makeCodexNativeCapture = Effect.gen(function* () {
     const lane = makeLane({ ...owner, provider: "codex" });
     return {
       pending: lane.pending,
+      close: lane.close,
       drain: lane.drain,
       record: (frame) => {
         const exclusion = frame.sensitiveResponse
