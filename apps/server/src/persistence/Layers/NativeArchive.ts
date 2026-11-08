@@ -14,6 +14,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { PersistenceSqlError } from "../Errors.ts";
 import { hasUnpairedSurrogate } from "../messageTextChunks.ts";
+import { makeHistoryPayloadWriter } from "../historyIndex.ts";
 import {
   NATIVE_ARCHIVE_CHUNK_BYTES,
   NATIVE_ARCHIVE_MAX_CHUNKS_PER_PAGE,
@@ -166,12 +167,16 @@ export const makeNativeArchiveRepository = Effect.gen(function* () {
       yield* sql`INSERT INTO durable_payloads(payload_id, project_id, thread_id, payload_key, encoding, byte_length, chunk_count, sha256)
       VALUES (${descriptor.payloadId}, ${scope.projectId}, ${scope.threadId}, ${payloadKey}, ${descriptor.encoding},
         ${descriptor.byteLength}, ${descriptor.chunkCount}, ${descriptor.sha256})`;
+      const writeHistory = makeHistoryPayloadWriter(sql, scope, descriptor.payloadId);
+      const decoder = new TextDecoder("utf8", { fatal: true, ignoreBOM: true });
       for (let index = 0; index < descriptor.chunkCount; index++) {
         const offset = index * NATIVE_ARCHIVE_CHUNK_BYTES;
         const bytes = content.bytes.subarray(offset, offset + NATIVE_ARCHIVE_CHUNK_BYTES);
         yield* sql`INSERT INTO durable_payload_chunks(payload_id, chunk_index, byte_offset, byte_length, sha256, bytes)
         VALUES (${descriptor.payloadId}, ${index}, ${offset}, ${bytes.byteLength}, ${digest(bytes)}, ${bytes})`;
+        yield* writeHistory(decoder.decode(bytes, { stream: index < descriptor.chunkCount - 1 }));
       }
+      yield* sql`INSERT INTO history_indexed_payloads VALUES (${descriptor.payloadId})`;
       return descriptor;
     });
 

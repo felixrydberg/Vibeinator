@@ -4,6 +4,7 @@ import { QueuedTurnPromotionRepositoryLive } from "./persistence/Layers/QueuedTu
 import { HubWorkRepositoryLive } from "./persistence/Layers/HubWorkRepository";
 import { ManagedAttachmentRepositoryLive } from "./persistence/Layers/ManagedAttachments";
 import { NativeArchiveRepositoryLive } from "./persistence/Layers/NativeArchive";
+import { ProjectHistoryRepositoryLive } from "./persistence/Layers/ProjectHistory";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Layer } from "effect";
 
@@ -260,6 +261,7 @@ export function makeServerRuntimeServicesLayer(
   const agentGatewayLayer = AgentGatewayLive.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
+        ProjectHistoryRepositoryLive.pipe(Layer.provideMerge(NativeArchiveRepositoryLive)),
         ProjectionThreadMessageRepositoryLive,
         OrchestrationCommandReceiptRepositoryLive,
         // The same instance the todo.* RPCs use, so a to-do an agent adds reaches open windows.

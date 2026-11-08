@@ -18,6 +18,8 @@ import { resolveSqliteMemoryBudget } from "../sqliteMemoryBudget.ts";
 import { reclaimFreedSqlitePages, reclaimLegacySqliteDatabase } from "../SqliteReclamation.ts";
 import { ServerConfig } from "../../config.ts";
 import { runNativeArchiveBackfill } from "../nativeArchiveBackfill.ts";
+import { backfillHistoryPayloads } from "../historyIndex.ts";
+import { NativeArchiveRepositoryLive, protectArchive } from "./NativeArchive.ts";
 import {
   acquireDatabaseLifecycleLock,
   releaseDatabaseLifecycleLock,
@@ -169,6 +171,10 @@ const makeSetup = ({
         ),
       );
       yield* runNativeArchiveBackfill;
+      yield* backfillHistoryPayloads.pipe(
+        protectArchive("History.backfill"),
+        Effect.provide(NativeArchiveRepositoryLive),
+      );
       if (dbPath) {
         const mode = yield* sql<{ readonly auto_vacuum: number }>`PRAGMA auto_vacuum;`;
         onSetupComplete?.(mode[0]?.auto_vacuum === 0);

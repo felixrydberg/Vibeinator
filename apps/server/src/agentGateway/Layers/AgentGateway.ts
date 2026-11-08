@@ -123,6 +123,8 @@ import { makeBrowserAutomationHost } from "../../browserAutomation/Layers/Browse
 import { makeProjectAgentTools } from "../projectAgentTools.ts";
 import { isServerGroupsEnabled } from "../../projectAgent/groupsBetaGate.ts";
 import { makeThreadReadTools } from "../threadReadTools.ts";
+import { makeHistoryTools } from "../historyTools.ts";
+import { ProjectHistoryRepository } from "../../persistence/Services/ProjectHistory.ts";
 import { makeThreadDiagnosticTools } from "../threadDiagnosticTools.ts";
 import { makeAgentGatewayKanbanTools } from "../kanbanTools.ts";
 import { makeAgentGatewayTodoTools } from "../todoTools.ts";
@@ -359,6 +361,8 @@ export const makeAgentGateway = Effect.gen(function* () {
       chatWorkspaceRoot: serverConfig.chatWorkspaceRoot,
     },
   });
+  const history = Option.getOrUndefined(yield* Effect.serviceOption(ProjectHistoryRepository));
+  const historyTools = history ? makeHistoryTools(history) : [];
   const diagnosticTools = makeThreadDiagnosticTools({
     snapshotQuery,
     diagnostics,
@@ -1648,6 +1652,7 @@ export const makeAgentGateway = Effect.gen(function* () {
 
   const tools: ReadonlyArray<ToolEntry> = [
     ...readTools,
+    ...historyTools,
     ...diagnosticTools,
     createThreads,
     createThread,
