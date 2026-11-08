@@ -40,6 +40,8 @@ jobs:
         run: bun run --cwd apps/server test src/persistence/Layers/NativeArchive.test.ts src/persistence/nativeArchiveBackfill.test.ts src/persistence/DurableMigrationFixtures.test.ts src/persistence/Migrations.test.ts src/persistence/Migrations/MigrationReplay.test.ts src/persistence/MigrationBackup.test.ts src/persistence/NodeSqliteClient.test.ts src/profileStatsArchive.test.ts
       - name: Project history search and exact reads
         run: bun run --cwd apps/server test src/persistence/Layers/ProjectHistory.test.ts src/threadSearch.test.ts
+      - name: Durable summary revisions
+        run: bun run --cwd apps/server test src/persistence/Layers/SummaryStore.test.ts
       # The inherited full suite includes Unix sockets and POSIX path/mode fixtures.
       # Keep the Windows adoption checks explicit; remaining qualification is VIB-001.
       - name: Windows contracts
@@ -47,7 +49,7 @@ jobs:
         run: bun run test --filter=@synara/contracts
       - name: Windows shared identity
         if: runner.os == 'Windows'
-        run: bun run test --filter=@synara/shared -- desktopIdentity.test.ts synaraHome.test.ts betaFeatures.test.ts
+        run: bun run test --filter=@synara/shared -- desktopIdentity.test.ts synaraHome.test.ts betaFeatures.test.ts browserAutomationCatalogue.test.ts
       - name: Windows build and publication policy
         if: runner.os == 'Windows'
         run: bun run test --filter=@synara/scripts -- desktop-artifact-identity.test.ts desktop-publish-config.test.ts build-desktop-artifact-mac-config.test.ts dev-runner.test.ts i18n.test.ts verify-packaged-desktop-startup.test.ts
