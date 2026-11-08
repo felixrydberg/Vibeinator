@@ -42,11 +42,19 @@ import type { Deferred, Effect, Stream } from "effect";
 import type { ProviderServiceError } from "../Errors.ts";
 import type { PersistedProviderRuntimeEvent } from "../../persistence/Services/ProviderRuntimeEvents.ts";
 import type {
+  HandoffDispatchPreparation,
+  HandoffStoreShape,
+} from "../../persistence/Services/HandoffStore.ts";
+import type {
   ProviderAdapterCapabilities,
   ProviderTurnDispatchOptions,
 } from "./ProviderAdapter.ts";
 
 export type ProviderRuntimeEventPumpStatus = "starting" | "healthy" | "recovering" | "degraded";
+
+export interface ProviderSendTurnOptions extends ProviderTurnDispatchOptions {
+  readonly handoff?: HandoffDispatchPreparation & { readonly store: HandoffStoreShape };
+}
 
 export interface ProviderRuntimeEventPumpHealth {
   readonly provider: ProviderKind;
@@ -159,7 +167,7 @@ export interface ProviderServiceShape {
    */
   readonly sendTurn: (
     input: ProviderSendTurnInput,
-    options?: ProviderTurnDispatchOptions,
+    options?: ProviderSendTurnOptions,
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
 
   /**

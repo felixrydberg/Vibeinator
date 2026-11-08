@@ -157,6 +157,7 @@ import Migration0142 from "./Migrations/142_DurableNativeArchive.ts";
 import Migration0143 from "./Migrations/143_NativeRecordingSessions.ts";
 import Migration0144 from "./Migrations/144_ProjectHistorySearch.ts";
 import Migration0145 from "./Migrations/145_DurableSummaryRevisions.ts";
+import Migration0146 from "./Migrations/146_DurableHandoffDispatch.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -313,6 +314,7 @@ export const migrationEntries = [
   [143, "NativeRecordingSessions", Migration0143],
   [144, "ProjectHistorySearch", Migration0144],
   [145, "DurableSummaryRevisions", Migration0145],
+  [146, "DurableHandoffDispatch", Migration0146],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

@@ -22811,6 +22811,103 @@ describe("ProviderCommandReactor", () => {
   describe("same-thread provider handoff", () => {
     const threadId = ThreadId.makeUnsafe("thread-1");
 
+    it("persists Codex to Claude to Codex packets on one conversation and leaves ordinary native turns incremental", async () => {
+      const harness = await createHarness({
+        threadModelSelection: { provider: "codex", model: "gpt-5.4" },
+        providerServiceLayer: createRetainingRestartProviderServiceLayer({
+          failFirstTeardown: false,
+        }),
+      });
+      const packets = () =>
+        Effect.runPromise(harness.sql<{ record: string; prepared: string }>`
+        SELECT record_json AS record, prepared_json AS prepared FROM handoff_packets ORDER BY sequence`);
+      const send = async (id: string, text: string) => {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.makeUnsafe(`command-${id}`),
+            threadId,
+            message: { messageId: asMessageId(id), role: "user", text, attachments: [] },
+            runtimeMode: "approval-required",
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        await harness.drain();
+      };
+      const ready = async (provider: ProviderKind) => {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.makeUnsafe(`ready-${provider}-${Date.now()}`),
+            threadId,
+            session: {
+              threadId,
+              status: "ready",
+              providerName: provider,
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: new Date().toISOString(),
+            },
+            createdAt: new Date().toISOString(),
+          }),
+        );
+      };
+      const handoff = async (id: string, modelSelection: ModelSelection) => {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.meta.update",
+            commandId: CommandId.makeUnsafe(id),
+            threadId,
+            modelSelection,
+            providerHandoff: true,
+          }),
+        );
+        await waitFor(
+          async () =>
+            (await readHarnessThread(harness))?.activities.some(
+              (activity) => activity.id === `provider-handoff:${id}`,
+            ) === true,
+        );
+      };
+      await send("initial-native", "Original decision: retain Electron");
+      await waitFor(
+        async () =>
+          (await Effect.runPromise(harness.realProviderService.listSessions())).length === 1,
+      );
+      expect(await packets()).toHaveLength(0);
+      await ready("codex");
+      await handoff("to-claude", { provider: "claudeAgent", model: "claude-sonnet-4-6" });
+      await send("claude-request", "Continue with the storage work");
+      await waitFor(async () => (await packets()).length === 1);
+      await ready("claudeAgent");
+      await handoff("back-to-codex", { provider: "codex", model: "gpt-5.4" });
+      await send("codex-request", "Keep the same conversation");
+      await waitFor(async () => (await packets()).length === 2);
+      const saved = await packets();
+      const records = saved.map((row) => JSON.parse(row.record));
+      expect(records.map((record) => record.threadId)).toEqual([threadId, threadId]);
+      expect(records.map((record) => record.target.provider)).toEqual(["claudeAgent", "codex"]);
+      expect(records[0].target.lifecycleGeneration).not.toBe(records[1].target.lifecycleGeneration);
+      for (const row of saved) expect(row.prepared).toContain("Original decision: retain Electron");
+      expect(JSON.parse(saved[1]!.prepared).currentRequest).toBe("Keep the same conversation");
+      await ready("codex");
+      await send("ordinary-native", "Only this new input");
+      await harness.drain();
+      expect(await packets()).toHaveLength(2);
+      expect(
+        (await readHarnessThread(harness))?.messages
+          .filter((message) => message.role === "user")
+          .map((message) => message.text),
+      ).toEqual([
+        "Original decision: retain Electron",
+        "Continue with the storage work",
+        "Keep the same conversation",
+        "Only this new input",
+      ]);
+    });
+
     async function runFirstGrokTurn(harness: Awaited<ReturnType<typeof createHarness>>) {
       const now = new Date().toISOString();
       await Effect.runPromise(
@@ -23020,6 +23117,10 @@ describe("ProviderCommandReactor", () => {
       expect(
         thread?.activities.find((activity) => activity.kind === "provider.handoff.failed"),
       ).toMatchObject({ id: "provider-handoff-failed:cmd-handoff-to-claude", tone: "error" });
+      await harness.drain();
+      const startEvidence = await Effect.runPromise(harness.sql<{ outcome: string }>`
+        SELECT outcome FROM handoff_start_outcomes ORDER BY outcome`);
+      expect(startEvidence.map((entry) => entry.outcome)).toEqual(["failed", "uncertain"]);
 
       // The thread stays usable on the source provider.
       await sendSecondTurn(harness);
