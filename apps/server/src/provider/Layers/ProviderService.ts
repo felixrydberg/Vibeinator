@@ -92,6 +92,7 @@ import {
 } from "../Services/ProviderSessionDirectory.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { PersistenceDecodeError } from "../../persistence/Errors.ts";
+import { ProviderSessionDirectoryPersistenceError } from "../Errors.ts";
 import { splitRuntimeTextForJournal } from "../providerRuntimeEventIngress.ts";
 import {
   NativeCaptureState,
@@ -4225,9 +4226,51 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 ? { modelSelection: routedModelSelection }
                 : {}),
             };
-            const turn = yield* options
-              ? routed.adapter.sendTurn(routedInput, options)
-              : routed.adapter.sendTurn(routedInput);
+            const packetPersistenceError = () =>
+              new ProviderSessionDirectoryPersistenceError({
+                operation: "ProviderService.sendTurn.handoff",
+                detail:
+                  "Handoff dispatch evidence could not be persisted. Review the delivery before retrying.",
+              });
+            const handoffStore = options?.handoff?.store;
+            const packetId = options?.handoff
+              ? yield* options.handoff.store
+                  .prepare({
+                    ...options.handoff,
+                    provider: routed.adapter.provider,
+                    providerInstanceId: routed.providerInstanceId,
+                    lifecycleGeneration: routed.lifecycleGeneration ?? "",
+                    dispatchInput: routedInput,
+                  })
+                  .pipe(Effect.mapError(packetPersistenceError))
+              : undefined;
+            // Do not pass internal preparation metadata to provider adapters.
+            const adapterOptions = options?.claudeCompactionCancellation
+              ? { claudeCompactionCancellation: options.claudeCompactionCancellation }
+              : undefined;
+            const turn = yield* (
+              adapterOptions
+                ? routed.adapter.sendTurn(routedInput, adapterOptions)
+                : routed.adapter.sendTurn(routedInput)
+            ).pipe(
+              Effect.tapError((error) => {
+                const rejected =
+                  error._tag === "ProviderAdapterValidationError" ||
+                  error._tag === "ProviderAdapterSessionNotFoundError" ||
+                  error._tag === "ProviderAdapterSessionClosedError" ||
+                  (error._tag === "ProviderAdapterProcessError" &&
+                    error.reason === "startup-failed");
+                return packetId && handoffStore && rejected
+                  ? handoffStore
+                      .recordFailure(packetId)
+                      .pipe(Effect.mapError(packetPersistenceError))
+                  : Effect.void;
+              }),
+            );
+            if (packetId && handoffStore)
+              yield* handoffStore
+                .recordTurn(packetId, turn.turnId, routed.adapter.provider === "codex")
+                .pipe(Effect.mapError(packetPersistenceError));
             const persistenceInput: StartedTurnPersistenceInput = {
               threadId: input.threadId,
               provider: routed.adapter.provider,

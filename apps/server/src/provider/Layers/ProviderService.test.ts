@@ -22,6 +22,8 @@ import type {
 import {
   ApprovalRequestId,
   EventId,
+  ProjectId,
+  HandoffPacketId,
   type ProviderInstanceId,
   type ServerSettings,
   type ProviderKind,
@@ -100,6 +102,11 @@ import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ServerSecretStore } from "../../auth/Services/ServerSecretStore.ts";
 import { ProviderSessionRuntimeRepositoryLive } from "../../persistence/Layers/ProviderSessionRuntime.ts";
+import { HandoffStore } from "../../persistence/Services/HandoffStore.ts";
+import { HandoffStoreLive } from "../../persistence/Layers/HandoffStore.ts";
+import { NativeArchiveRepository } from "../../persistence/Services/NativeArchive.ts";
+import { NativeArchiveRepositoryLive } from "../../persistence/Layers/NativeArchive.ts";
+import { buildHandoffPacket } from "../../orchestration/handoffPacket.ts";
 import { ProviderSessionRuntimeRepository } from "../../persistence/Services/ProviderSessionRuntime.ts";
 import {
   makeSqlitePersistenceLive,
@@ -729,6 +736,114 @@ function makeProviderServiceLayer(
 }
 
 const routing = makeProviderServiceLayer();
+
+for (const driver of ["codex", "claudeAgent"] as const) {
+  it.effect(
+    `persists exact ${driver} handoff dispatch before the adapter and quarantines lost receipts`,
+    () => {
+      const fixture = makeProviderServiceLayer();
+      const adapter = driver === "codex" ? fixture.codex : fixture.claude;
+      const layer = fixture.rawLayer.pipe(
+        Layer.provideMerge(HandoffStoreLive),
+        Layer.provideMerge(NativeArchiveRepositoryLive),
+        Layer.provideMerge(SqlitePersistenceMemory),
+      );
+      return Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const store = yield* HandoffStore;
+        const archive = yield* NativeArchiveRepository;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = asThreadId(`handoff-${driver}`);
+        const projectId = ProjectId.makeUnsafe("handoff-project");
+        const time = "2026-11-08T12:00:00.000Z";
+        yield* sql`INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at)
+        VALUES (${projectId},'Fixture','/fixture','[]',${time},${time})`;
+        yield* sql`INSERT INTO projection_threads(thread_id,project_id,title,created_at,updated_at)
+        VALUES (${threadId},${projectId},'Fixture',${time},${time})`;
+        yield* sql`INSERT INTO orchestration_events(event_id,aggregate_kind,stream_id,stream_version,event_type,occurred_at,command_id,actor_kind,payload_json,metadata_json)
+        VALUES ('dispatch-request','thread',${threadId},1,'thread.turn-start-requested',${time},'dispatch-command','user','{}','{}')`;
+        yield* provider.startSession(threadId, {
+          threadId,
+          provider: driver,
+          runtimeMode: "full-access",
+        });
+        const prepared = buildHandoffPacket({
+          projectId,
+          threadId,
+          sourceWatermark: { orchestrationSequence: 1, captureSequence: 0 },
+          projectSummary: { revision: null, refresh: "unavailable" },
+          chatSummary: { revision: null, refresh: "unavailable" },
+          objective: null,
+          recentMessages: [],
+          earlierMessageCount: 0,
+          currentRequest: "Exact latest request 🦊",
+          maxInputChars: 120_000,
+          reservedChars: 1000,
+          unsummarizedSources: 1,
+        });
+        const sendInput = {
+          threadId,
+          input: `outer project prefix\n${prepared.dispatchText}\nouter skill suffix`,
+          modelSelection: { provider: driver, model: "test-model" },
+        };
+        const options = {
+          handoff: { prepared, eventSequence: 1, reason: "handoff" as const, store },
+        };
+        const send = adapter.sendTurn.getMockImplementation()!;
+        adapter.sendTurn.mockImplementation((input) =>
+          Effect.gen(function* () {
+            const rows = yield* sql<{
+              id: string;
+            }>`SELECT packet_id AS id FROM handoff_packets ORDER BY sequence DESC LIMIT 1`;
+            assert.ok(rows[0], "Provider must never see input before its packet commits");
+            const saved = yield* store.get(
+              { projectId, threadId },
+              HandoffPacketId.makeUnsafe(rows[0]!.id),
+            );
+            const chunks = yield* archive
+              .streamPayload({
+                projectId,
+                threadId,
+                payloadId: saved!.packet.dispatchInput.payloadId,
+              })
+              .pipe(Stream.runCollect);
+            assert.deepEqual(JSON.parse(Buffer.concat([...chunks]).toString("utf8")), input);
+            assert.deepEqual(
+              saved!.outcomes.map((entry) => entry.outcome),
+              ["uncertain"],
+            );
+            return yield* send(input);
+          }).pipe(Effect.orDie),
+        );
+        yield* sql`CREATE TRIGGER fail_packet BEFORE INSERT ON handoff_packets BEGIN SELECT RAISE(ABORT, 'fixture'); END`;
+        const blocked = yield* provider.sendTurn(sendInput, options).pipe(Effect.result);
+        assert.equal(blocked._tag, "Failure");
+        assert.equal(adapter.sendTurn.mock.calls.length, 0);
+        yield* sql`DROP TRIGGER fail_packet`;
+        yield* provider.sendTurn(sendInput, options);
+        const outcomes = yield* sql<{
+          outcome: string;
+        }>`SELECT outcome FROM handoff_outcomes ORDER BY outcome`;
+        assert.deepEqual(
+          outcomes.map((entry) => entry.outcome),
+          driver === "codex" ? ["accepted", "uncertain"] : ["uncertain"],
+        );
+        yield* sql`CREATE TRIGGER fail_receipt BEFORE INSERT ON handoff_dispatch_receipts BEGIN SELECT RAISE(ABORT, 'fixture'); END`;
+        const unknown = yield* provider.sendTurn(sendInput, options).pipe(Effect.result);
+        assert.equal(unknown._tag, "Failure");
+        assert.equal(adapter.sendTurn.mock.calls.length, 2);
+        const latest = yield* sql<{
+          outcome: string;
+        }>`SELECT outcome FROM handoff_outcomes WHERE packet_id =
+        (SELECT packet_id FROM handoff_packets ORDER BY sequence DESC LIMIT 1)`;
+        assert.deepEqual(
+          latest.map((entry) => entry.outcome),
+          ["uncertain"],
+        );
+      }).pipe(Effect.provide(layer));
+    },
+  );
+}
 
 it.effect(
   "stops a runtime on journal failure, blocks new work and retries storage without executing another turn",

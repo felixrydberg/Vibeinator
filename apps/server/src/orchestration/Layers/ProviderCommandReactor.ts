@@ -149,6 +149,13 @@ import { ProjectAgentService } from "../../projectAgent/Services/ProjectAgentSer
 import { ProjectAgentRepository } from "../../persistence/Services/ProjectAgentRepository.ts";
 import { resolveProviderDispatchAttachments } from "../../provider/providerAttachmentPaths.ts";
 import { OrchestrationEventDeliveryRepositoryLive } from "../../persistence/Layers/OrchestrationEventDeliveries.ts";
+import {
+  HandoffStore,
+  type HandoffDispatchPreparation,
+} from "../../persistence/Services/HandoffStore.ts";
+import { HandoffStoreLive } from "../../persistence/Layers/HandoffStore.ts";
+import { SummaryStoreRepositoryLive } from "../../persistence/Layers/SummaryStore.ts";
+import { makeHandoffContextLoader } from "../handoffContext.ts";
 import { ProjectionPendingInteractionRepositoryLive } from "../../persistence/Layers/ProjectionPendingInteractions.ts";
 import { ProviderRuntimeEventRepositoryLive } from "../../persistence/Layers/ProviderRuntimeEvents.ts";
 import {
@@ -1014,6 +1021,8 @@ const make = Effect.gen(function* () {
   } = yield* ProviderCommandReactorConfig;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const deliveryRepository = yield* OrchestrationEventDeliveryRepository;
+  const handoffStore = yield* HandoffStore;
+  const loadHandoffContext = yield* makeHandoffContextLoader;
   const turnCheckpointCoordinator = yield* TurnCheckpointCoordinator;
   const queuedTurnPromotions = yield* QueuedTurnPromotionRepository;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
@@ -3925,7 +3934,7 @@ const make = Effect.gen(function* () {
     }
     // The guards above make the three bootstrap flavors mutually exclusive, so
     // a turn carries at most one context block.
-    const selectedBootstrapContext: BootstrapContextSelection | null =
+    let selectedBootstrapContext: BootstrapContextSelection | null =
       handoffBootstrapText !== null
         ? { tag: "handoff_context", contextText: handoffBootstrapText, wrapLatestUserMessage: true }
         : sidechatBootstrapText !== null
@@ -3976,6 +3985,66 @@ const make = Effect.gen(function* () {
             ),
           )
         : "";
+    const prepareDispatchContext = (reason: HandoffDispatchPreparation["reason"]) =>
+      Effect.gen(function* () {
+        const prepared = yield* loadHandoffContext({
+          thread,
+          boundaryMessageId: transcriptBoundaryMessageId,
+          currentRequest: input.messageText,
+          reservedChars:
+            providerPromptOverheadChars +
+            projectContextPrefix.length +
+            mentionContextSuffix.length +
+            Math.max(0, boundaryMessageText.length - input.messageText.length) +
+            (skillInlineText ? skillInlineText.length + 2 : 0) +
+            appendAppSnapPromptContext("", input.attachments).length +
+            PROVIDER_INPUT_SAFETY_MARGIN_CHARS,
+        });
+        if (prepared.status !== "ready")
+          return yield* new ProviderAdapterValidationError({
+            provider: selectedProvider,
+            operation: "thread.turn.start",
+            issue:
+              "The latest message is too long to include the context required by this provider session. Shorten the message and retry.",
+          });
+        return {
+          prepared,
+          eventSequence: executingIntentSequence,
+          reason,
+        } satisfies HandoffDispatchPreparation;
+      });
+    let dispatchPreparation: HandoffDispatchPreparation | undefined;
+    const canPrepareDurableContext =
+      input.reviewTarget === undefined &&
+      input.dispatchMode !== "steer" &&
+      !shouldBootstrapSidechatContext &&
+      thread.forkSourceThreadId === null &&
+      thread.sidechatSourceThreadId === null &&
+      !forkFromEarlierTurnContextThreadIds.has(input.threadId) &&
+      !(selectedProvider === "claudeAgent" && /^\/compact(?:\s|$)/.test(input.messageText.trim()));
+    if (
+      canPrepareDurableContext &&
+      (shouldBootstrapHandoff ||
+        (shouldBootstrapPriorTranscriptContext && priorTranscriptMessages.length > 0))
+    ) {
+      dispatchPreparation = yield* prepareDispatchContext(
+        shouldBootstrapHandoff || followsProviderHandoff ? "handoff" : "recovery",
+      );
+      selectedBootstrapContext = {
+        tag: shouldBootstrapHandoff ? "handoff_context" : "thread_context",
+        contextText: dispatchPreparation.prepared.contextText,
+        wrapLatestUserMessage: true,
+      };
+      if (providerContextLifecycleEvidence)
+        providerContextLifecycleEvidence = {
+          ...providerContextLifecycleEvidence,
+          recapText: dispatchPreparation.prepared.contextText,
+          recapCoverage: {
+            omittedMessages: dispatchPreparation.prepared.omissions.messageCount,
+            shortenedMessages: dispatchPreparation.prepared.omissions.shortenedMessages,
+          },
+        };
+    }
     const finalizeProviderInput = (bootstrap: BootstrapContextSelection | null) => {
       // Native control commands must remain the first token in every mode.
       if (
@@ -4125,10 +4194,16 @@ const make = Effect.gen(function* () {
             ...providerTurnInput,
             ...(messageText ? { input: messageText } : {}),
           };
-          return yield* input.claudeCompactionCancellation
-            ? providerService.sendTurn(turnInput, {
-                claudeCompactionCancellation: input.claudeCompactionCancellation,
-              })
+          const dispatchOptions = {
+            ...(input.claudeCompactionCancellation
+              ? { claudeCompactionCancellation: input.claudeCompactionCancellation }
+              : {}),
+            ...(dispatchPreparation
+              ? { handoff: { ...dispatchPreparation, store: handoffStore } }
+              : {}),
+          };
+          return yield* Object.keys(dispatchOptions).length
+            ? providerService.sendTurn(turnInput, dispatchOptions)
             : providerService.sendTurn(turnInput);
         }),
       );
@@ -4381,8 +4456,16 @@ const make = Effect.gen(function* () {
           });
           yield* ensureSessionForStaleRetry;
 
-          const retryBootstrap =
-            priorTranscriptBootstrapAvailableChars > 0
+          dispatchPreparation = canPrepareDurableContext
+            ? yield* prepareDispatchContext("recovery")
+            : undefined;
+          const retryBootstrap = dispatchPreparation
+            ? {
+                text: dispatchPreparation.prepared.contextText,
+                omittedMessages: dispatchPreparation.prepared.omissions.messageCount,
+                shortenedMessages: dispatchPreparation.prepared.omissions.shortenedMessages,
+              }
+            : priorTranscriptBootstrapAvailableChars > 0
               ? buildPriorTranscriptBootstrap(
                   thread,
                   transcriptBoundaryMessageId,
@@ -8166,6 +8249,7 @@ const make = Effect.gen(function* () {
     // The requesting command id when there is one, so the client that asked
     // can wait for exactly this handoff's outcome row.
     readonly handoffKey: string;
+    readonly eventSequence: number;
     readonly threadId: ThreadId;
     readonly occurredAt: string;
     readonly sourceModelSelection: ModelSelection;
@@ -8189,6 +8273,7 @@ const make = Effect.gen(function* () {
     // the handoff explicitly abandons it. This also stops the source runtime.
     let sourceContinuationReset = false;
     let blockedByBackgroundTasks = false;
+    let startAttemptId: string | undefined;
     const startOutcome = yield* runBoundedProviderCall({
       label: "The provider handoff",
       // Keep the existing native-phase budget. The durable source restore and
@@ -8222,6 +8307,12 @@ const make = Effect.gen(function* () {
             issue: "Finish or stop this thread's background tasks before handing it off.",
           });
         }
+        startAttemptId = yield* handoffStore.prepareStart({
+          threadId: input.threadId,
+          eventSequence: input.eventSequence,
+          source: input.sourceModelSelection,
+          target: input.targetModelSelection,
+        });
         yield* providerService.clearSessionResumeCursor
           ? providerService.clearSessionResumeCursor({ threadId: input.threadId })
           : providerService.stopSession({ threadId: input.threadId });
@@ -8264,6 +8355,28 @@ const make = Effect.gen(function* () {
               }),
             );
     const createdAt = new Date().toISOString();
+    const persistStartEvidence = startAttemptId
+      ? handoffStore
+          .finishStart(
+            startAttemptId,
+            startOutcome._tag === "ok"
+              ? "started"
+              : startOutcome._tag === "failed" && startOutcome.outcome._tag === "rejected"
+                ? "failed"
+                : "uncertain",
+          )
+          .pipe(
+            Effect.mapError(
+              () =>
+                new OrchestrationCommandInternalError({
+                  commandId: CommandId.makeUnsafe(input.handoffKey),
+                  commandType: "thread.meta.update",
+                  detail:
+                    "Provider handoff start evidence could not be persisted after its native phase.",
+                }),
+            ),
+          )
+      : Effect.void;
     const payload = {
       sourceProvider: input.sourceModelSelection.provider,
       sourceModel: input.sourceModelSelection.model,
@@ -8306,6 +8419,7 @@ const make = Effect.gen(function* () {
         },
         createdAt,
       });
+      yield* persistStartEvidence;
       return;
     }
     // The source's native history was abandoned above, so its next fresh
@@ -8350,6 +8464,7 @@ const make = Effect.gen(function* () {
       },
       createdAt,
     });
+    yield* persistStartEvidence;
   });
 
   const processSessionStopRequested = (
@@ -8567,6 +8682,7 @@ const make = Effect.gen(function* () {
           if (event.payload.providerHandoff !== undefined) {
             yield* applyProviderHandoff({
               handoffKey: event.commandId ?? event.eventId,
+              eventSequence: event.sequence,
               threadId: event.payload.threadId,
               occurredAt: event.occurredAt,
               sourceModelSelection: event.payload.providerHandoff.sourceModelSelection,
@@ -11084,6 +11200,8 @@ export const makeProviderCommandReactorLive = (options?: ProviderCommandReactorL
   return Layer.effect(ProviderCommandReactor, make).pipe(
     Layer.provide(ProjectionThreadActivityRepositoryLive),
     Layer.provide(ProjectionThreadMessageRepositoryLive),
+    Layer.provide(HandoffStoreLive),
+    Layer.provide(SummaryStoreRepositoryLive),
     Layer.provide(
       Layer.succeed(ProviderCommandReactorConfig, {
         commandEventTimeout: options?.commandEventTimeout ?? PROVIDER_COMMAND_EVENT_TIMEOUT,
