@@ -30,6 +30,23 @@ export class HandoffPacketInputError extends Error {
   }
 }
 
+const summaryFragment = (
+  source: BuildHandoffPacketInput["projectSummary"],
+): PreparedHandoffPacket["projectSummary"] => ({
+  revisionId: source.revision?.revisionId ?? null,
+  refresh:
+    source.refresh === "current"
+      ? source.revision === null
+        ? "unavailable"
+        : source.revision.text.length
+          ? "current"
+          : "empty"
+      : source.refresh,
+  processedThrough: source.revision?.processedThrough ?? null,
+  text: "",
+  retainedChars: 0,
+  originalChars: source.revision?.text.length ?? 0,
+});
 /** Pure preparation only. Persistence, session changes and dispatch belong to the existing reactor. */
 export function buildHandoffPacket(raw: BuildHandoffPacketInput): PreparedHandoffPacket {
   let input: BuildHandoffPacketInput;
@@ -63,23 +80,6 @@ export function buildHandoffPacket(raw: BuildHandoffPacketInput): PreparedHandof
   )
     throw new HandoffPacketInputError();
 
-  const summaryFragment = (
-    source: BuildHandoffPacketInput["projectSummary"],
-  ): PreparedHandoffPacket["projectSummary"] => ({
-    revisionId: source.revision?.revisionId ?? null,
-    refresh:
-      source.refresh === "current"
-        ? source.revision === null
-          ? "unavailable"
-          : source.revision.text.length
-            ? "current"
-            : "empty"
-        : source.refresh,
-    processedThrough: source.revision?.processedThrough ?? null,
-    text: "",
-    retainedChars: 0,
-    originalChars: source.revision?.text.length ?? 0,
-  });
   let projectSummary = summaryFragment(input.projectSummary);
   let chatSummary = summaryFragment(input.chatSummary);
   let objective: PreparedHandoffPacket["objective"] =
@@ -222,7 +222,9 @@ export function buildHandoffPacket(raw: BuildHandoffPacketInput): PreparedHandof
     chatSummary,
     objective,
     recentMessages: selected.map((item) => ({
-      ...item.message,
+      threadId: item.message.threadId,
+      messageId: item.message.messageId,
+      role: item.message.role,
       text: item.text,
       retainedChars: item.retainedChars,
       originalChars: item.message.text.length,
