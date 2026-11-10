@@ -51,13 +51,11 @@ export default Effect.gen(function* () {
         AND turn_id = COALESCE(json_extract(NEW.payload_json, '$.turnId'), json_extract(NEW.payload_json, '$.activity.turnId'))
         AND through_sequence < NEW.sequence;
     END`;
-  // Existing successful boundaries are eligible too; the durable cursor begins at zero.
+  // One allocation fence covers historical late sources without rescanning a chat for every turn.
   yield* sql`INSERT OR IGNORE INTO retention_jobs(job_key, thread_id, turn_id, reason, boundary_sequence, through_sequence)
     SELECT json_array('turn', stream_id, json_extract(payload_json, '$.activity.turnId')), stream_id,
       json_extract(payload_json, '$.activity.turnId'), 'coding-turn', MIN(sequence),
-      COALESCE((SELECT MAX(late.sequence) FROM orchestration_events AS late WHERE late.stream_id = event.stream_id
-        AND (json_extract(late.payload_json, '$.turnId') = json_extract(event.payload_json, '$.activity.turnId')
-          OR json_extract(late.payload_json, '$.activity.turnId') = json_extract(event.payload_json, '$.activity.turnId'))), MAX(sequence))
+      (SELECT COALESCE(MAX(sequence), 0) FROM orchestration_events)
     FROM orchestration_events AS event WHERE event_type = 'thread.activity-appended'
       AND json_extract(payload_json, '$.activity.kind') = 'turn.completed'
       AND json_extract(payload_json, '$.activity.payload.state') = 'completed'
