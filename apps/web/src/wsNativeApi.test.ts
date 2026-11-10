@@ -8,6 +8,7 @@ import {
   CommandId,
   type ContextMenuItem,
   EventId,
+  DEFAULT_SERVER_SETTINGS,
   ORCHESTRATION_WS_CHANNELS,
   ORCHESTRATION_WS_METHODS,
   type OrchestrationEvent,
@@ -302,6 +303,7 @@ describe("wsNativeApi", () => {
 
     const payload = {
       settings: {
+        decisionEngine: DEFAULT_SERVER_SETTINGS.decisionEngine,
         autoResumeAfterUsageLimits: false,
         usageLimitRecoveryEpoch: 0,
         enableAssistantStreaming: true,

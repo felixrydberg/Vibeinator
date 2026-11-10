@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { dirname } from "node:path";
+import { mkdirSync, renameSync, rmdirSync } from "node:fs";
 import {
   DEFAULT_DROID_GIT_TEXT_GENERATION_MODEL,
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
@@ -11,7 +12,8 @@ import {
   deriveProviderInstances,
   providerStartOptionsFromInstance,
 } from "@synara/shared/providerInstances";
-import { Effect, FileSystem, Layer, Schema } from "effect";
+import { Effect, FileSystem, Layer, Schema, Stream, Option } from "effect";
+import { DECISION_ENGINE_CREDENTIAL_SECRET } from "./decisionEngine/credentials.ts";
 import { isBetaFeatureEnabled } from "@synara/shared/betaFeatures";
 import { describe, expect, it } from "vitest";
 import { providerDisabledSettingsMessage } from "./provider/enabledProviderAdapter";
@@ -40,6 +42,148 @@ const runWithSettings = <A, E>(
 ) => Effect.runPromise(effect.pipe(Effect.provide(testLayer)) as Effect.Effect<A, E, never>);
 
 describe("ServerSettingsService", () => {
+  it("persists decision settings and origin-bound credentials without exposing the key in settings snapshots", async () => {
+    await runWithSettings(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const service = yield* ServerSettingsService;
+          const config = yield* ServerConfig;
+          const fs = yield* FileSystem.FileSystem;
+          yield* service.start;
+          const changes = yield* service.subscribeChanges;
+          const view = yield* service.updateSettingsView({
+            decisionEngine: {
+              endpoint: "https://decisions.example/v1/systemone",
+              model: "operator-model",
+              timeoutMs: 1200,
+              credential: "private-decision-key",
+            },
+          });
+          expect(view.decisionEngine).toEqual({
+            enabled: true,
+            endpoint: "https://decisions.example/v1/systemone",
+            model: "operator-model",
+            timeoutMs: 1200,
+            credentialConfigured: true,
+          });
+          const snapshot = yield* service.getSnapshot;
+          const published = Option.getOrThrow(yield* Stream.runHead(changes));
+          expect(published.decisionEngine.credentialConfigured).toBe(true);
+          expect(JSON.stringify(published)).not.toContain("private-decision-key");
+          expect(JSON.stringify(snapshot)).not.toContain("private-decision-key");
+          expect(yield* fs.readFileString(config.settingsPath)).not.toContain(
+            "private-decision-key",
+          );
+          const restarted = yield* Effect.gen(function* () {
+            const next = yield* ServerSettingsService;
+            yield* next.start;
+            return yield* next.getSettingsView;
+          }).pipe(
+            Effect.provide(
+              ServerSettingsLive.pipe(
+                Layer.provide(Layer.merge(NodeServices.layer, Layer.succeed(ServerConfig, config))),
+              ),
+            ),
+          );
+          expect(restarted.decisionEngine).toEqual(view.decisionEngine);
+          const foreign = yield* service.updateSettingsView({
+            decisionEngine: { endpoint: "https://different.example/v1/systemone" },
+          });
+          expect(foreign.decisionEngine.credentialConfigured).toBe(false);
+          const restored = yield* service.updateSettingsView({
+            decisionEngine: { endpoint: "https://decisions.example/other-path" },
+          });
+          expect(restored.decisionEngine.credentialConfigured).toBe(true);
+          const cleared = yield* service.updateSettingsView({
+            decisionEngine: { credential: null },
+          });
+          expect(cleared.decisionEngine.credentialConfigured).toBe(false);
+          const invalid = yield* service
+            .updateSettings({ decisionEngine: { credential: "private\r\nheader" } })
+            .pipe(Effect.result);
+          expect(invalid._tag).toBe("Failure");
+          expect(JSON.stringify(invalid)).not.toContain("private");
+          const invalidUrl = yield* service
+            .updateSettings({
+              decisionEngine: { endpoint: "https://private:key@host.example/api" },
+            })
+            .pipe(Effect.result);
+          expect(invalidUrl._tag).toBe("Failure");
+          expect(JSON.stringify(invalidUrl)).not.toMatch(/private|key@/);
+        }),
+      ),
+    );
+  });
+
+  it("rolls back a decision credential when the settings file cannot be committed", async () => {
+    await runWithSettings(
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsService;
+        const config = yield* ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        yield* service.start;
+        yield* service.updateSettings({ decisionEngine: { credential: "original-key" } });
+        const secretPath = `${config.secretsDir}/${DECISION_ENGINE_CREDENTIAL_SECRET}.bin`;
+        const before = yield* fs.readFile(secretPath);
+        const backup = `${config.settingsPath}.fixture-backup`;
+        let swapped = false;
+        const result = yield* service
+          .updateSettings({}, () => {
+            // The real writer has already loaded settings under its lock; fail its eventual atomic rename.
+            renameSync(config.settingsPath, backup);
+            mkdirSync(config.settingsPath);
+            swapped = true;
+            return {
+              decisionEngine: { credential: "replacement-key", model: "replacement-model" },
+            };
+          })
+          .pipe(
+            Effect.result,
+            Effect.ensuring(
+              Effect.sync(() => {
+                if (swapped) {
+                  rmdirSync(config.settingsPath);
+                  renameSync(backup, config.settingsPath);
+                }
+              }),
+            ),
+          );
+        expect(result._tag).toBe("Failure");
+        expect(yield* fs.readFile(secretPath)).toEqual(before);
+        expect((yield* service.getSettings).decisionEngine.model).toBe("clef");
+      }),
+    );
+  });
+
+  it("rejects unsafe decision endpoints and credentials at the settings boundary", () => {
+    expect(DEFAULT_SERVER_SETTINGS.decisionEngine).toEqual({
+      enabled: true,
+      endpoint: "http://localhost:11434/v1/systemone",
+      model: "clef",
+      timeoutMs: 5000,
+      credentialConfigured: false,
+    });
+    for (const endpoint of [
+      "file:///tmp/data",
+      "http://192.168.1.2/v1/systemone",
+      "https://name:secret@example.com/v1/systemone",
+      "https://example.com/api?key=secret",
+      "https://example.com/api#secret",
+    ]) {
+      expect(() =>
+        Schema.decodeUnknownSync(ServerSettingsPatchSchema)({ decisionEngine: { endpoint } }),
+      ).toThrow();
+    }
+    expect(() =>
+      Schema.decodeUnknownSync(ServerSettingsPatchSchema)({
+        decisionEngine: { credential: "header\ninjection" },
+      }),
+    ).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(ServerSettingsPatchSchema)({ decisionEngine: { timeoutMs: 0 } }),
+    ).toThrow();
+  });
+
   it("defaults usage-limit recovery off and persists policy invalidation across restart", async () => {
     expect(Schema.decodeSync(ServerSettingsSchema)({})).toMatchObject({
       autoResumeAfterUsageLimits: false,

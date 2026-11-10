@@ -4,6 +4,7 @@
 // Exports: Vitest suites for providerUpdates.ts
 
 import type { ProviderKind, ServerProviderStatus, ServerSettings } from "@synara/contracts";
+import { DEFAULT_SERVER_SETTINGS } from "@synara/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -55,6 +56,7 @@ function serverSettings(overrides: Partial<ServerSettings["providers"]> = {}): S
   };
 
   return {
+    decisionEngine: DEFAULT_SERVER_SETTINGS.decisionEngine,
     autoResumeAfterUsageLimits: false,
     usageLimitRecoveryEpoch: 0,
     enableAssistantStreaming: false,
