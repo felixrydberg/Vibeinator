@@ -688,6 +688,7 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
         [144, "ProjectHistorySearch"],
         [145, "DurableSummaryRevisions"],
         [146, "DurableHandoffDispatch"],
+        [147, "RetentionClassification"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -781,6 +782,7 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
           { migration_id: 144, name: "ProjectHistorySearch" },
           { migration_id: 145, name: "DurableSummaryRevisions" },
           { migration_id: 146, name: "DurableHandoffDispatch" },
+          { migration_id: 147, name: "RetentionClassification" },
         ],
       );
       const groupConfigColumns = yield* sql<{ readonly name: string }>`
@@ -954,6 +956,7 @@ agentGatewayRetentionLegacyLayer(
           [144, "ProjectHistorySearch"],
           [145, "DurableSummaryRevisions"],
           [146, "DurableHandoffDispatch"],
+          [147, "RetentionClassification"],
         ]);
 
         const columns = yield* sql<{ readonly name: string }>`
@@ -1090,6 +1093,7 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [144, "ProjectHistorySearch"],
         [145, "DurableSummaryRevisions"],
         [146, "DurableHandoffDispatch"],
+        [147, "RetentionClassification"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -1167,6 +1171,7 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [144, "ProjectHistorySearch"],
           [145, "DurableSummaryRevisions"],
           [146, "DurableHandoffDispatch"],
+          [147, "RetentionClassification"],
         ],
       );
 
@@ -1298,6 +1303,7 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [144, "ProjectHistorySearch"],
         [145, "DurableSummaryRevisions"],
         [146, "DurableHandoffDispatch"],
+        [147, "RetentionClassification"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -1371,6 +1377,7 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [144, "ProjectHistorySearch"],
           [145, "DurableSummaryRevisions"],
           [146, "DurableHandoffDispatch"],
+          [147, "RetentionClassification"],
         ],
       );
       const preservedSpaces = yield* sql<{ readonly spaceId: string }>`

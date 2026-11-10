@@ -2,7 +2,7 @@
 
 A desktop app for working with Codex and Claude while preserving project context across sessions and provider switches.
 
-Status: the desktop baseline, SQLite archive storage, Codex/Claude native capture, [capture failure/replay guarantees](docs/CAPTURE-REPLAY.md), [project history search/exact reads](docs/PROJECT-HISTORY.md), [summary revision storage](docs/SUMMARY-REVISIONS.md), [bounded, durable handoff dispatch](docs/HANDOFF-PACKETS.md) and the [decision-engine client](docs/DECISION-ENGINE.md) are implemented. Conversations restore paused after restart. Automatic summary generation and summary/context panels remain planned. Windows is the current CI gate; Linux qualification is deferred.
+Status: the desktop baseline, SQLite archive storage, Codex/Claude native capture, [capture failure/replay guarantees](docs/CAPTURE-REPLAY.md), [project history search/exact reads](docs/PROJECT-HISTORY.md), [summary revision storage](docs/SUMMARY-REVISIONS.md), [bounded, durable handoff dispatch](docs/HANDOFF-PACKETS.md), the [decision-engine client](docs/DECISION-ENGINE.md) and [durable retention classification](docs/RETENTION-CLASSIFICATION.md) are implemented. Conversations restore paused after restart. Automatic summary generation and summary/context panels remain planned. Windows is the current CI gate; Linux qualification is deferred.
 
 The [Synara audit](docs/SYNARA-AUDIT.md) maps the existing implementation and confirmed gaps. The [implementation draft](docs/IMPLEMENTATION-DRAFT.md) defines issues, dependencies, acceptance criteria, and milestone order. The [tracker](docs/IMPLEMENTATION-TRACKER.md) links twenty GitHub issues and records delivery state. The [adoption report](docs/BASELINE-ADOPTION.md) records passing checks and remaining qualification. [UPSTREAM.md](UPSTREAM.md) records the source revision and retained notices.
 
@@ -98,7 +98,7 @@ Maintain two independently revisioned summaries:
 | Known problems                   | Active problems/blockers     |
 | Failed approaches to avoid       | Outstanding work             |
 
-After each successful coding turn, Clef classifies bounded message sections for retention and category. Store candidate source-event IDs and classifications. Explicit objective/status changes always enter chat-summary updates.
+After each successful coding turn, Clef [classifies bounded source sections](docs/RETENTION-CLASSIFICATION.md) for retention and category. Candidate source-event IDs, classifications and resumable section positions are stored atomically. An unavailable decision engine conservatively leaves information pending. Explicit objective/status changes always enter the chat-summary candidate queue without inference.
 
 The active coding provider rewrites summaries in a separate, tool-disabled maintenance session after five completed turns with pending retained information, and before handoff or goal completion. Deduplicate, replace superseded facts, and resolve completed blockers; do not append every message.
 

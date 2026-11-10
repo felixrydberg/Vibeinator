@@ -9,6 +9,7 @@ import { HubOutputReactor } from "../Services/HubOutputReactor.ts";
 import { ThreadGitMetadataReactor } from "../Services/ThreadGitMetadataReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
+import { RetentionClassification } from "../../retention/Services/RetentionClassification.ts";
 
 describe("OrchestrationReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<OrchestrationReactor, never> | null = null;
@@ -27,6 +28,17 @@ describe("OrchestrationReactor", () => {
 
     runtime = ManagedRuntime.make(
       Layer.effect(OrchestrationReactor, makeOrchestrationReactor).pipe(
+        Layer.provideMerge(
+          Layer.succeed(RetentionClassification, {
+            start: Effect.acquireRelease(
+              Effect.sync(() => {
+                started.push("retention-classification");
+              }),
+              () => Effect.sync(() => stopped.push("retention-classification")),
+            ),
+            drain: Effect.void,
+          }),
+        ),
         Layer.provideMerge(
           Layer.succeed(SidechatExpiryReactor, {
             start: Effect.acquireRelease(
@@ -115,6 +127,7 @@ describe("OrchestrationReactor", () => {
     await Effect.runPromise(reactor.startProviderCommands.pipe(Scope.provide(scope)));
 
     expect(started).toEqual([
+      "retention-classification",
       "studio-output-reactor",
       "checkpoint-reactor",
       "thread-git-metadata-reactor",
@@ -133,6 +146,7 @@ describe("OrchestrationReactor", () => {
       "thread-git-metadata-reactor",
       "checkpoint-reactor",
       "studio-output-reactor",
+      "retention-classification",
     ]);
   });
 });

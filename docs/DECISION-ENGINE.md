@@ -44,7 +44,7 @@ The transport reuses `@synara/shared/outboundHttp`; no second fetch/streaming/re
 
 A valid response returns `{ status: "decided", answers }`, containing only validated label/probability data. Disabled, invalid-request, configuration, credential, unavailable, unauthorized, timeout, cancelled, invalid-response and uncertain cases return `{ status: "fallback", reason, retainInformation: true }`. No fallback invents a selected label; pending information stays retained.
 
-The service executes no tools, generates no operation arguments, grants no permissions, changes no goals and writes no conversation history. Its outputs are advisory inputs for later classification/routing work, separate from authoritative application admission and provider approvals.
+The service executes no tools, generates no operation arguments, grants no permissions, changes no goals and writes no conversation history. The [retention classifier](RETENTION-CLASSIFICATION.md) uses its advisory outputs to store bounded source candidates, separate from authoritative application admission and provider approvals.
 
 ## Verification and live qualification
 

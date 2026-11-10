@@ -7,6 +7,7 @@ import { NativeArchiveRepositoryLive } from "./persistence/Layers/NativeArchive"
 import { ProjectHistoryRepositoryLive } from "./persistence/Layers/ProjectHistory";
 import { SummaryStoreRepositoryLive } from "./persistence/Layers/SummaryStore";
 import { DecisionEngineLive } from "./decisionEngine/Layers/DecisionEngine.ts";
+import { RetentionClassificationLive } from "./retention/Layers/RetentionClassification.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Layer } from "effect";
 
@@ -106,6 +107,14 @@ export function makeServerRuntimeServicesLayer(
   const agentGatewayCredentialsLayer =
     options.agentGatewayCredentialsLayer ?? AgentGatewayCredentialsWithSecretsLive;
   const serverSettingsLayer = ServerSettingsLive;
+  const decisionEngineLayer = DecisionEngineLive.pipe(
+    Layer.provide(serverSettingsLayer),
+    Layer.provide(ServerSecretStoreLive),
+  );
+  const retentionClassificationLayer = RetentionClassificationLive.pipe(
+    Layer.provide(decisionEngineLayer),
+    Layer.provide(SummaryStoreRepositoryLive),
+  );
   const providerHealthLayer = ProviderHealthLive.pipe(Layer.provideMerge(serverSettingsLayer));
   const checkpointStoreLayer = CheckpointStoreLive.pipe(Layer.provide(GitCoreLive));
 
@@ -189,6 +198,7 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(checkpointStoreLayer),
   );
   const orchestrationReactorLayer = OrchestrationReactorLive.pipe(
+    Layer.provideMerge(retentionClassificationLayer),
     Layer.provideMerge(runtimeIngestionLayer),
     Layer.provideMerge(providerCommandReactorLayer),
     Layer.provideMerge(checkpointReactorLayer),
@@ -314,10 +324,7 @@ export function makeServerRuntimeServicesLayer(
   );
 
   return Layer.mergeAll(
-    DecisionEngineLive.pipe(
-      Layer.provide(serverSettingsLayer),
-      Layer.provide(ServerSecretStoreLive),
-    ),
+    decisionEngineLayer,
     SummaryStoreRepositoryLive,
     NativeArchiveRepositoryLive,
     agentGatewayCredentialsLayer,

@@ -10,6 +10,7 @@ import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeInge
 import { SidechatExpiryReactor } from "../Services/SidechatExpiryReactor.ts";
 import { HubOutputReactor } from "../Services/HubOutputReactor.ts";
 import { ThreadGitMetadataReactor } from "../Services/ThreadGitMetadataReactor.ts";
+import { RetentionClassification } from "../../retention/Services/RetentionClassification.ts";
 
 export const makeOrchestrationReactor = Effect.gen(function* () {
   const providerRuntimeIngestion = yield* ProviderRuntimeIngestionService;
@@ -18,8 +19,10 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const hubOutputReactor = yield* HubOutputReactor;
   const threadGitMetadataReactor = yield* ThreadGitMetadataReactor;
   const sidechatExpiryReactor = yield* SidechatExpiryReactor;
+  const retentionClassification = yield* RetentionClassification;
 
   const start: OrchestrationReactorShape["start"] = Effect.gen(function* () {
+    yield* retentionClassification.start;
     yield* hubOutputReactor.start;
     yield* checkpointReactor.start;
     yield* threadGitMetadataReactor.start;
