@@ -547,6 +547,7 @@ describe("native archive", () => {
           [144, "ProjectHistorySearch"],
           [145, "DurableSummaryRevisions"],
           [146, "DurableHandoffDispatch"],
+          [147, "RetentionClassification"],
         ]);
         expect(yield* sql`SELECT * FROM native_recording_sessions`).toEqual(recording);
         expect(yield* sql`SELECT * FROM durable_archive_backfill ORDER BY source_kind`).toEqual(

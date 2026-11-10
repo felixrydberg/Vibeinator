@@ -44,6 +44,8 @@ jobs:
         run: bun run --cwd apps/server test src/persistence/Layers/SummaryStore.test.ts
       - name: Decision engine and private settings
         run: bun run --cwd apps/server test src/decisionEngine/Layers/DecisionEngine.test.ts src/serverSettings.test.ts
+      - name: Durable retention classification and startup
+        run: bun run --cwd apps/server test src/retention/Layers/RetentionClassification.test.ts src/orchestration/Layers/OrchestrationReactor.test.ts
       - name: Embedded settings transport
         run: bun run test:web:focused src/providerUpdates.test.ts src/wsNativeApi.test.ts
       - name: Bounded handoff packets

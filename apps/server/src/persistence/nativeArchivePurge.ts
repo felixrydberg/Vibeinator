@@ -18,6 +18,7 @@ export const purgeThreadNativeArchive = (sql: SqlClient.SqlClient, threadId: str
       yield* sql`DELETE FROM handoff_packets WHERE project_id = ${projectId}`;
     }
     yield* sql`DELETE FROM handoff_start_attempts WHERE thread_id = ${threadId}`;
+    yield* sql`DELETE FROM retention_jobs WHERE thread_id = ${threadId}`;
     yield* purgeThreadSummarySources(sql, threadId);
     yield* sql`DELETE FROM native_normalization_links WHERE thread_id = ${threadId}`;
     yield* sql`DELETE FROM durable_legacy_sources WHERE thread_id = ${threadId}`;
